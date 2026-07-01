@@ -4,13 +4,16 @@ class Order {
   final String client;
   final String brand;
   final String status; // pending, accepted, in_transit, arrived, delivered
+  final String driverId;
   final String driverName;
   final String driverVehicle;
   final String passcode;
   final double progress;
   final int eta;
-  final double currentX;
-  final double currentY;
+  final double currentX; // Para compatibilidad, o latitud actual
+  final double currentY; // Para compatibilidad, o longitud actual
+  final double destLatitude;
+  final double destLongitude;
   final List<Map<String, dynamic>> chatLogs;
 
   Order({
@@ -19,6 +22,7 @@ class Order {
     required this.client,
     required this.brand,
     required this.status,
+    this.driverId = '',
     required this.driverName,
     required this.driverVehicle,
     required this.passcode,
@@ -26,6 +30,8 @@ class Order {
     required this.eta,
     required this.currentX,
     required this.currentY,
+    required this.destLatitude,
+    required this.destLongitude,
     required this.chatLogs,
   });
 
@@ -36,6 +42,7 @@ class Order {
       client: data['client'] ?? '',
       brand: data['brand'] ?? '',
       status: data['status'] ?? 'pending',
+      driverId: data['driverId'] ?? '',
       driverName: data['driverName'] ?? '',
       driverVehicle: data['driverVehicle'] ?? '',
       passcode: data['passcode'] ?? '',
@@ -43,6 +50,8 @@ class Order {
       eta: data['eta'] ?? 0,
       currentX: (data['currentX'] ?? 0.0).toDouble(),
       currentY: (data['currentY'] ?? 0.0).toDouble(),
+      destLatitude: (data['destLatitude'] ?? 20.3700).toDouble(),
+      destLongitude: (data['destLongitude'] ?? -100.0150).toDouble(),
       chatLogs: List<Map<String, dynamic>>.from(data['chatLogs'] ?? []),
     );
   }
@@ -53,6 +62,7 @@ class Order {
       'client': client,
       'brand': brand,
       'status': status,
+      'driverId': driverId,
       'driverName': driverName,
       'driverVehicle': driverVehicle,
       'passcode': passcode,
@@ -60,6 +70,8 @@ class Order {
       'eta': eta,
       'currentX': currentX,
       'currentY': currentY,
+      'destLatitude': destLatitude,
+      'destLongitude': destLongitude,
       'chatLogs': chatLogs,
     };
   }

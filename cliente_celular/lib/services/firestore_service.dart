@@ -18,6 +18,21 @@ class FirestoreService {
     });
   }
 
+  // Assign driver to order
+  Future<void> assignDriverToOrder(
+    String orderId, {
+    required String driverId,
+    required String driverName,
+    required String driverVehicle,
+  }) async {
+    await _db.collection('orders').doc(orderId).update({
+      'driverId': driverId,
+      'driverName': driverName,
+      'driverVehicle': driverVehicle,
+      'status': 'accepted',
+    });
+  }
+
   // Update order tracking parameters
   Future<void> updateOrderTracking(
     String orderId, {
@@ -59,13 +74,16 @@ class FirestoreService {
         'client': 'Emmanuel S.',
         'brand': 'Amazon Prime',
         'status': 'pending',
-        'driverName': 'Carlos Ruiz',
-        'driverVehicle': 'Motocicleta Honda (Negra) - FHJ-429',
+        'driverId': '',
+        'driverName': '',
+        'driverVehicle': '',
         'passcode': '4829',
         'progress': 0.0,
         'eta': 8,
-        'currentX': 80.0,
-        'currentY': 70.0,
+        'currentX': 20.3720,
+        'currentY': -100.0190,
+        'destLatitude': 20.3680,
+        'destLongitude': -100.0120,
         'chatLogs': [
           {'sender': 'system', 'text': 'Pedido creado en Amazon Prime', 'timestamp': DateTime.now().millisecondsSinceEpoch}
         ]
@@ -75,13 +93,16 @@ class FirestoreService {
         'client': 'Sofía L.',
         'brand': 'MercadoLibre',
         'status': 'pending',
-        'driverName': 'Sofía López',
-        'driverVehicle': 'Yamaha Cripton (Azul) - KLJ-881',
+        'driverId': '',
+        'driverName': '',
+        'driverVehicle': '',
         'passcode': '7721',
         'progress': 0.0,
         'eta': 12,
-        'currentX': 80.0,
-        'currentY': 70.0,
+        'currentX': 20.3720,
+        'currentY': -100.0190,
+        'destLatitude': 20.3750,
+        'destLongitude': -100.0150,
         'chatLogs': [
           {'sender': 'system', 'text': 'Pedido creado en MercadoLibre', 'timestamp': DateTime.now().millisecondsSinceEpoch}
         ]
@@ -91,13 +112,16 @@ class FirestoreService {
         'client': 'Roberto M.',
         'brand': 'DHL Express',
         'status': 'pending',
-        'driverName': 'Roberto Gómez',
-        'driverVehicle': 'Nissan Urvan (Blanco) - PLM-341',
+        'driverId': '',
+        'driverName': '',
+        'driverVehicle': '',
         'passcode': '9083',
         'progress': 0.0,
         'eta': 6,
-        'currentX': 80.0,
-        'currentY': 70.0,
+        'currentX': 20.3720,
+        'currentY': -100.0190,
+        'destLatitude': 20.3700,
+        'destLongitude': -100.0250,
         'chatLogs': [
           {'sender': 'system', 'text': 'Pedido creado en DHL Express', 'timestamp': DateTime.now().millisecondsSinceEpoch}
         ]

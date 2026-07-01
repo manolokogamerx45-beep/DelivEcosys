@@ -1,11 +1,175 @@
 import 'dart:async';
+import 'dart:io';
+import 'dart:convert';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart' hide Order;
 import 'package:provider/provider.dart';
 import 'firebase_options.dart';
 import 'models/order.dart';
+import 'models/app_user.dart';
+import 'models/driver.dart';
+import 'services/auth_service.dart';
 import 'services/firestore_service.dart';
-import 'widgets/vector_map_painter.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:latlong2/latlong.dart';
+// ----------------------------------------------------------------------------
+// CONFIGURACIÓN DE MAPBOX Y ENRUTAMIENTO REAL (OSRM)
+// ----------------------------------------------------------------------------
+String mapboxAccessToken = 'YOUR_MAPBOX_ACCESS_TOKEN'; // El usuario puede pegar su token aquí
+String mapboxStyleId = 'streets-v12'; // e.g. streets-v12, satellite-streets-v12, dark-v11, light-v11
+
+// Retorna la capa de mapas correspondiente (Mapbox si hay token, o OpenStreetMap de respaldo)
+TileLayer buildMapTileLayer() {
+  if (mapboxAccessToken.trim().isNotEmpty &&
+      mapboxAccessToken != 'YOUR_MAPBOX_ACCESS_TOKEN' &&
+      !mapboxAccessToken.startsWith('YOUR_')) {
+    return TileLayer(
+      urlTemplate: 'https://api.mapbox.com/styles/v1/mapbox/$mapboxStyleId/tiles/256/{z}/{x}/{y}@2x?access_token=$mapboxAccessToken',
+      userAgentPackageName: 'com.example.cliente_celular',
+    );
+  } else {
+    return TileLayer(
+      urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+      userAgentPackageName: 'com.example.cliente_celular',
+    );
+  }
+}
+
+// Genera un recorrido en línea recta de respaldo si falla el API de OSRM
+List<LatLng> getFallbackStraightRoute(LatLng start, LatLng end) {
+  final List<LatLng> points = [];
+  const int steps = 15;
+  for (int i = 0; i <= steps; i++) {
+    final double t = i / steps;
+    points.add(LatLng(
+      start.latitude + (end.latitude - start.latitude) * t,
+      start.longitude + (end.longitude - start.longitude) * t,
+    ));
+  }
+  return points;
+}
+
+// Consulta el API público gratuito de OSRM para obtener la ruta por calles en formato GeoJSON
+Future<List<LatLng>> fetchOSRMRoute(LatLng start, LatLng end) async {
+  try {
+    final client = HttpClient();
+    final request = await client.getUrl(Uri.parse(
+      'https://router.project-osrm.org/route/v1/driving/'
+      '${start.longitude},${start.latitude};${end.longitude},${end.latitude}'
+      '?overview=full&geometries=geojson'
+    ));
+    final response = await request.close();
+    if (response.statusCode == 200) {
+      final responseBody = await response.transform(utf8.decoder).join();
+      final data = json.decode(responseBody);
+      final routes = data['routes'] as List;
+      if (routes.isNotEmpty) {
+        final geometry = routes[0]['geometry'];
+        final coordinates = geometry['coordinates'] as List;
+        return coordinates.map<LatLng>((coord) {
+          // GeoJSON es [longitud, latitud]
+          return LatLng(coord[1] as double, coord[0] as double);
+        }).toList();
+      }
+    }
+  } catch (e) {
+    debugPrint("Error fetching route from OSRM: $e");
+  }
+  return [];
+}
+
+// Diálogo interactivo para elegir el estilo visual del mapa
+void showMapSettingsDialog(BuildContext context, VoidCallback onSaved) {
+  String tempStyleId = mapboxStyleId;
+
+  showDialog(
+    context: context,
+    builder: (context) {
+      return StatefulBuilder(
+        builder: (context, setDialogState) {
+          return AlertDialog(
+            backgroundColor: Colors.white,
+            surfaceTintColor: Colors.white,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            title: Row(
+              children: const [
+                Icon(Icons.map_rounded, color: Color(0xFF10B981)),
+                SizedBox(width: 8),
+                Text(
+                  'Estilo del Mapa',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.black87),
+                ),
+              ],
+            ),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Selecciona el diseño visual para el mapa de seguimiento:',
+                    style: TextStyle(fontSize: 12, color: Colors.black54, height: 1.4),
+                  ),
+                  const SizedBox(height: 16),
+                  DropdownButtonFormField<String>(
+                    value: tempStyleId,
+                    dropdownColor: Colors.white,
+                    decoration: InputDecoration(
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(10),
+                        borderSide: const BorderSide(color: Color(0xFF10B981), width: 1.5),
+                      ),
+                    ),
+                    style: const TextStyle(fontSize: 12, color: Colors.black87),
+                    items: const [
+                      DropdownMenuItem(value: 'streets-v12', child: Text('Calles Estándar')),
+                      DropdownMenuItem(value: 'outdoors-v12', child: Text('Exteriores')),
+                      DropdownMenuItem(value: 'light-v11', child: Text('Claro Premium')),
+                      DropdownMenuItem(value: 'dark-v11', child: Text('Oscuro Premium')),
+                      DropdownMenuItem(value: 'satellite-streets-v12', child: Text('Satélite Híbrido')),
+                    ],
+                    onChanged: (val) {
+                      if (val != null) {
+                        setDialogState(() {
+                          tempStyleId = val;
+                        });
+                      }
+                    },
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancelar', style: TextStyle(color: Colors.grey, fontSize: 13, fontWeight: FontWeight.bold)),
+              ),
+              FilledButton(
+                onPressed: () {
+                  mapboxStyleId = tempStyleId;
+                  Navigator.pop(context);
+                  onSaved();
+                },
+                style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFF10B981),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                ),
+                child: const Text('Aplicar', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+              ),
+            ],
+          );
+        },
+      );
+    },
+  );
+}
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -18,8 +182,11 @@ void main() async {
   }
 
   runApp(
-    Provider<FirestoreService>(
-      create: (_) => FirestoreService(),
+    MultiProvider(
+      providers: [
+        Provider<FirestoreService>(create: (_) => FirestoreService()),
+        Provider<AuthService>(create: (_) => AuthService()),
+      ],
       child: const UnifiedDelivApp(),
     ),
   );
@@ -50,264 +217,455 @@ class UnifiedDelivApp extends StatelessWidget {
 }
 
 // ----------------------------------------------------------------------------
-// Authentication Wrapper / Role Switcher State
+// Authentication Wrapper — escucha Firebase Auth y redirige por rol
 // ----------------------------------------------------------------------------
-class AuthWrapper extends StatefulWidget {
+class AuthWrapper extends StatelessWidget {
   const AuthWrapper({super.key});
 
   @override
-  State<AuthWrapper> createState() => _AuthWrapperState();
-}
-
-class _AuthWrapperState extends State<AuthWrapper> {
-  bool _isLoggedIn = false;
-  String _role = 'client'; // 'client' or 'driver'
-  String _selectedOrderId = 'order-1'; // Tracks active client view order selection
-
-  void _login(String role, String selectedOrderId) {
-    setState(() {
-      _role = role;
-      _selectedOrderId = selectedOrderId;
-      _isLoggedIn = true;
-    });
-  }
-
-  void _logout() {
-    setState(() {
-      _isLoggedIn = false;
-    });
-  }
-
-  @override
   Widget build(BuildContext context) {
-    if (!_isLoggedIn) {
-      return LoginScreen(onLogin: _login);
-    }
+    final authService = Provider.of<AuthService>(context, listen: false);
 
-    if (_role == 'driver') {
-      return RiderDashboardScreen(onLogout: _logout);
-    }
+    return StreamBuilder<User?>(
+      stream: authService.authStateChanges,
+      builder: (context, snapshot) {
+        // Cargando estado de auth
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Scaffold(
+            body: Center(child: CircularProgressIndicator()),
+          );
+        }
 
-    return CustomerPhoneScreen(
-      selectedOrderId: _selectedOrderId,
-      onLogout: _logout,
+        // No hay sesión activa → mostrar login
+        if (!snapshot.hasData || snapshot.data == null) {
+          return const LoginScreen();
+        }
+
+        // Hay sesión → cargar rol del usuario
+        return FutureBuilder<AppUser?>(
+          future: authService.getCurrentAppUser(),
+          builder: (context, userSnap) {
+            if (userSnap.connectionState == ConnectionState.waiting) {
+              return const Scaffold(
+                body: Center(child: CircularProgressIndicator()),
+              );
+            }
+
+            final appUser = userSnap.data;
+            if (appUser == null) {
+              return const LoginScreen();
+            }
+
+            // Redirigir según rol
+            if (appUser.isAdmin) {
+              return AdminPanelScreen(appUser: appUser);
+            } else if (appUser.isDriver) {
+              return InAppNotificationOverlay(
+                userEmail: appUser.email,
+                child: RiderDashboardScreen(
+                  appUser: appUser,
+                  onLogout: () => authService.signOut(),
+                ),
+              );
+            } else {
+              return InAppNotificationOverlay(
+                userEmail: appUser.email,
+                child: CustomerPhoneScreen(
+                  selectedOrderId: 'order-1',
+                  onLogout: () => authService.signOut(),
+                ),
+              );
+            }
+          },
+        );
+      },
     );
   }
 }
 
 // ----------------------------------------------------------------------------
-// Login Screen Layout
+// Login Screen — formulario único con redirección automática por rol
 // ----------------------------------------------------------------------------
 class LoginScreen extends StatefulWidget {
-  final Function(String role, String selectedOrderId) onLogin;
-
-  const LoginScreen({super.key, required this.onLogin});
+  const LoginScreen({super.key});
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
 }
 
-class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStateMixin {
-  late TabController _tabController;
-  final _emailController = TextEditingController(text: 'emmanuel@cliente.com');
-  final _passwordController = TextEditingController(text: '123456');
-  final _driverController = TextEditingController(text: 'carlos@repartidor.com');
-  final _driverPasswordController = TextEditingController(text: 'driver123');
-  String _selectedClientOrderId = 'order-1';
-
-  @override
-  void initState() {
-    super.initState();
-    _tabController = TabController(length: 2, vsync: this);
-  }
+class _LoginScreenState extends State<LoginScreen> {
+  final _emailController = TextEditingController();
+  final _passwordController = TextEditingController();
+  final _nameController = TextEditingController();
+  bool _isLoading = false;
+  bool _obscurePassword = true;
+  bool _isRegistering = false; // Alternar entre Login y Registro
+  String? _errorMessage;
 
   @override
   void dispose() {
-    _tabController.dispose();
     _emailController.dispose();
     _passwordController.dispose();
-    _driverController.dispose();
-    _driverPasswordController.dispose();
+    _nameController.dispose();
     super.dispose();
+  }
+
+  Future<void> _handleAuthAction() async {
+    final email = _emailController.text.trim();
+    final password = _passwordController.text;
+    final name = _nameController.text.trim();
+
+    if (email.isEmpty || password.isEmpty || (_isRegistering && name.isEmpty)) {
+      setState(() => _errorMessage = 'Por favor completa todos los campos.');
+      return;
+    }
+
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+
+    try {
+      final authService = Provider.of<AuthService>(context, listen: false);
+      if (_isRegistering) {
+        await authService.registerWithEmail(name: name, email: email, password: password);
+      } else {
+        await authService.signIn(email, password);
+      }
+    } on FirebaseAuthException catch (e) {
+      final authService = Provider.of<AuthService>(context, listen: false);
+      setState(() => _errorMessage = authService.getErrorMessage(e));
+    } catch (e) {
+      setState(() => _errorMessage = 'Ocurrió un error. Intenta de nuevo.');
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _handleGoogleLogin() async {
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+
+    try {
+      final authService = Provider.of<AuthService>(context, listen: false);
+      final user = await authService.signInWithGoogle();
+      if (user == null) {
+        if (mounted) setState(() => _isLoading = false);
+        return;
+      }
+    } on FirebaseAuthException catch (e) {
+      final authService = Provider.of<AuthService>(context, listen: false);
+      setState(() => _errorMessage = authService.getErrorMessage(e));
+    } catch (e) {
+      setState(() => _errorMessage = 'Error al iniciar sesión con Google.');
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFEFF6FF), // Soft premium blue-grey background
-      body: Center(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24.0),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // Logo/Header Icon
-              Container(
-                width: 64,
-                height: 64,
-                decoration: const BoxDecoration(
-                  color: Color(0xFF3B82F6),
-                  shape: BoxShape.circle,
-                  boxShadow: [
-                    BoxShadow(color: Colors.blueAccent, blurRadius: 15, offset: Offset(0, 4)),
-                  ],
+      backgroundColor: const Color(0xFFF8FAFC), // Fondo blanco roto / gris muy claro
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: 28.0, vertical: 40),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Logo circular estilizado sin degradado, color plano
+                Container(
+                  width: 80,
+                  height: 80,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF2563EB), // Azul corporativo plano
+                    shape: BoxShape.circle,
+                    boxShadow: [
+                      BoxShadow(
+                        color: const Color(0xFF2563EB).withOpacity(0.2),
+                        blurRadius: 16,
+                        spreadRadius: 2,
+                      ),
+                    ],
+                  ),
+                  child: const Icon(Icons.local_shipping_rounded, color: Colors.white, size: 40),
                 ),
-                child: const Icon(Icons.local_shipping, color: Colors.white, size: 32),
-              ),
-              const SizedBox(height: 16),
-              const Text(
-                'DelivEcosys',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 24, letterSpacing: 0.5, color: Color(0xFF1E3A8A)),
-              ),
-              const Text(
-                'Sistema Unificado de Reparto',
-                style: TextStyle(color: Colors.black54, fontSize: 13),
-              ),
-              const SizedBox(height: 32),
-              
-              // Auth Card
-              Card(
-                color: Colors.white,
-                elevation: 8,
-                shadowColor: Colors.black12,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-                child: Container(
-                  width: 380,
-                  padding: const EdgeInsets.all(24.0),
+                const SizedBox(height: 20),
+                const Text(
+                  'DelivEcosys',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w800,
+                    fontSize: 28,
+                    letterSpacing: 0.5,
+                    color: Color(0xFF0F172A), // Letra oscura
+                  ),
+                ),
+                const SizedBox(height: 4),
+                const Text(
+                  'Sistema de Gestión de Entregas',
+                  style: TextStyle(color: Color(0xFF64748B), fontSize: 13),
+                ),
+                const SizedBox(height: 32),
+
+                // Card del formulario (Fondo blanco puro, borde gris sutil)
+                Container(
+                  constraints: const BoxConstraints(maxWidth: 400),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(24),
+                    border: Border.all(color: const Color(0xFFE2E8F0)),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.04),
+                        blurRadius: 24,
+                        offset: const Offset(0, 8),
+                      ),
+                    ],
+                  ),
+                  padding: const EdgeInsets.all(28),
                   child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      // Role Selector Tabs
-                      TabBar(
-                        controller: _tabController,
-                        labelColor: const Color(0xFF3B82F6),
-                        unselectedLabelColor: Colors.black45,
-                        indicatorColor: const Color(0xFF3B82F6),
-                        indicatorSize: TabBarIndicatorSize.tab,
-                        tabs: const [
-                          Tab(icon: Icon(Icons.person), text: 'Cliente'),
-                          Tab(icon: Icon(Icons.delivery_dining), text: 'Repartidor'),
-                        ],
+                      Text(
+                        _isRegistering ? 'Crear Cuenta' : 'Iniciar Sesión',
+                        style: const TextStyle(
+                          color: Color(0xFF0F172A),
+                          fontSize: 20,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        _isRegistering 
+                            ? 'Regístrate para recibir tus paquetes' 
+                            : 'Ingresa tus credenciales para continuar',
+                        style: const TextStyle(color: Color(0xFF64748B), fontSize: 12),
                       ),
                       const SizedBox(height: 24),
-                      
-                      // Tab contents wrapper
-                      SizedBox(
-                        height: 270,
-                        child: TabBarView(
-                          controller: _tabController,
-                          children: [
-                            // 1. Client Login Form
-                            _buildClientTab(),
-                            // 2. Driver Login Form
-                            _buildDriverTab(),
-                          ],
+
+                      // Campo Nombre (solo si nos registramos)
+                      if (_isRegistering) ...[
+                        _buildLabel('Tu Nombre Completo'),
+                        const SizedBox(height: 6),
+                        _buildTextField(
+                          controller: _nameController,
+                          hint: 'Juan Pérez',
+                          icon: Icons.person_outline_rounded,
                         ),
-                      )
+                        const SizedBox(height: 16),
+                      ],
+
+                      // Email
+                      _buildLabel('Correo electrónico'),
+                      const SizedBox(height: 6),
+                      _buildTextField(
+                        controller: _emailController,
+                        hint: 'ejemplo@correo.com',
+                        icon: Icons.email_outlined,
+                        keyboardType: TextInputType.emailAddress,
+                      ),
+                      const SizedBox(height: 16),
+
+                      // Password
+                      _buildLabel('Contraseña'),
+                      const SizedBox(height: 6),
+                      _buildTextField(
+                        controller: _passwordController,
+                        hint: '••••••••',
+                        icon: Icons.lock_outline_rounded,
+                        obscure: _obscurePassword,
+                        suffixIcon: IconButton(
+                          icon: Icon(
+                            _obscurePassword ? Icons.visibility_off_outlined : Icons.visibility_outlined,
+                            color: const Color(0xFF94A3B8),
+                            size: 20,
+                          ),
+                          onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
+                        ),
+                      ),
+                      const SizedBox(height: 24),
+
+                      // Error
+                      if (_errorMessage != null)
+                        Container(
+                          margin: const EdgeInsets.only(bottom: 16),
+                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFFEF2F2),
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: const Color(0xFFFCA5A5)),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.error_outline, color: Color(0xFFEF4444), size: 16),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  _errorMessage!,
+                                  style: const TextStyle(color: Color(0xFF991B1B), fontSize: 12),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+
+                      // Botón primario
+                      SizedBox(
+                        width: double.infinity,
+                        height: 50,
+                        child: ElevatedButton(
+                          onPressed: _isLoading ? null : _handleAuthAction,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF2563EB),
+                            foregroundColor: Colors.white,
+                            disabledBackgroundColor: const Color(0xFF93C5FD),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            elevation: 0,
+                          ),
+                          child: _isLoading
+                              ? const SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(
+                                    color: Colors.white,
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : Text(
+                                  _isRegistering ? 'Registrarse' : 'Ingresar',
+                                  style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+                                ),
+                        ),
+                      ),
+
+                      const SizedBox(height: 16),
+                      Row(
+                        children: const [
+                          Expanded(child: Divider(color: Color(0xFFE2E8F0), thickness: 1)),
+                          Padding(
+                            padding: EdgeInsets.symmetric(horizontal: 12.0),
+                            child: Text(
+                              'o',
+                              style: TextStyle(color: Color(0xFF94A3B8), fontSize: 12),
+                            ),
+                          ),
+                          Expanded(child: Divider(color: Color(0xFFE2E8F0), thickness: 1)),
+                        ],
+                      ),
+                      const SizedBox(height: 16),
+
+                      // Botón Google Sign-In
+                      SizedBox(
+                        width: double.infinity,
+                        height: 50,
+                        child: OutlinedButton.icon(
+                          onPressed: _isLoading ? null : _handleGoogleLogin,
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: const Color(0xFF0F172A),
+                            side: const BorderSide(color: Color(0xFFE2E8F0)),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                          icon: Image.network(
+                            'https://upload.wikimedia.org/wikipedia/commons/thumb/5/53/Google_%22G%22_Logo.svg/512px-Google_%22G%22_Logo.svg.png',
+                            height: 18,
+                            width: 18,
+                            errorBuilder: (context, error, stackTrace) => const Icon(
+                              Icons.g_mobiledata_rounded, 
+                              color: Color(0xFF2563EB), 
+                              size: 24,
+                            ),
+                          ),
+                          label: const Text(
+                            'Continuar con Google',
+                            style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                      ),
                     ],
                   ),
                 ),
-              ),
-            ],
+
+                const SizedBox(height: 24),
+                // Botón alternador para registrarse / iniciar sesión
+                TextButton(
+                  onPressed: () {
+                    setState(() {
+                      _isRegistering = !_isRegistering;
+                      _errorMessage = null;
+                    });
+                  },
+                  child: Text(
+                    _isRegistering 
+                        ? '¿Ya tienes cuenta? Inicia sesión' 
+                        : '¿No tienes una cuenta? Regístrate aquí',
+                    style: const TextStyle(
+                      color: Color(0xFF2563EB), 
+                      fontWeight: FontWeight.bold,
+                      fontSize: 13,
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
     );
   }
 
-  Widget _buildClientTab() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text('SELECCIONA TU PERFIL DE CLIENTE:', style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.grey)),
-        const SizedBox(height: 8),
-        DropdownButtonFormField<String>(
-          value: _selectedClientOrderId,
-          decoration: InputDecoration(
-            contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-            fillColor: const Color(0xFFF3F4F6),
-            filled: true,
-          ),
-          items: const [
-            DropdownMenuItem(value: 'order-1', child: Text('Emmanuel S. (Amazon)')),
-            DropdownMenuItem(value: 'order-2', child: Text('Sofía L. (MercadoLibre)')),
-            DropdownMenuItem(value: 'order-3', child: Text('Roberto M. (DHL Express)')),
-          ],
-          onChanged: (val) {
-            if (val != null) {
-              setState(() {
-                _selectedClientOrderId = val;
-                if (val == 'order-1') _emailController.text = 'emmanuel@cliente.com';
-                if (val == 'order-2') _emailController.text = 'sofia@cliente.com';
-                if (val == 'order-3') _emailController.text = 'roberto@cliente.com';
-              });
-            }
-          },
-        ),
-        const SizedBox(height: 12),
-        TextField(
-          controller: _emailController,
-          decoration: InputDecoration(
-            labelText: 'Correo Electrónico',
-            prefixIcon: const Icon(Icons.email_outlined, size: 20),
-            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-          ),
-        ),
-        const SizedBox(height: 24),
-        SizedBox(
-          width: double.infinity,
-          height: 48,
-          child: FilledButton(
-            onPressed: () => widget.onLogin('client', _selectedClientOrderId),
-            style: FilledButton.styleFrom(
-              backgroundColor: const Color(0xFF3B82F6),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-            ),
-            child: const Text('Iniciar Sesión Cliente', style: TextStyle(fontWeight: FontWeight.bold)),
-          ),
-        )
-      ],
+  Widget _buildLabel(String text) {
+    return Text(
+      text,
+      style: const TextStyle(
+        color: Color(0xFF475569),
+        fontSize: 12,
+        fontWeight: FontWeight.w600,
+        letterSpacing: 0.3,
+      ),
     );
   }
 
-  Widget _buildDriverTab() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text('CREDENCIALES DE ACCESO ESPECIAL:', style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.grey)),
-        const SizedBox(height: 12),
-        TextField(
-          controller: _driverController,
-          decoration: InputDecoration(
-            labelText: 'Código / Correo del Repartidor',
-            prefixIcon: const Icon(Icons.badge_outlined, size: 20),
-            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-          ),
+  Widget _buildTextField({
+    required TextEditingController controller,
+    required String hint,
+    required IconData icon,
+    bool obscure = false,
+    TextInputType keyboardType = TextInputType.text,
+    Widget? suffixIcon,
+  }) {
+    return TextField(
+      controller: controller,
+      obscureText: obscure,
+      keyboardType: keyboardType,
+      style: const TextStyle(color: Color(0xFF0F172A), fontSize: 14), // Letra oscura en el campo
+      decoration: InputDecoration(
+        hintText: hint,
+        hintStyle: const TextStyle(color: Color(0xFF94A3B8)),
+        prefixIcon: Icon(icon, color: const Color(0xFF94A3B8), size: 18),
+        suffixIcon: suffixIcon,
+        filled: true,
+        fillColor: const Color(0xFFF1F5F9), // Fondo del input gris claro
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: Color(0xFFE2E8F0)),
         ),
-        const SizedBox(height: 12),
-        TextField(
-          controller: _driverPasswordController,
-          obscureText: true,
-          decoration: InputDecoration(
-            labelText: 'Contraseña',
-            prefixIcon: const Icon(Icons.lock_outline, size: 20),
-            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-          ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: Color(0xFFE2E8F0)),
         ),
-        const SizedBox(height: 24),
-        SizedBox(
-          width: double.infinity,
-          height: 48,
-          child: FilledButton(
-            onPressed: () => widget.onLogin('driver', ''),
-            style: FilledButton.styleFrom(
-              backgroundColor: const Color(0xFF10B981), // Driver Emerald Green
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-            ),
-            child: const Text('Iniciar Sesión Repartidor', style: TextStyle(fontWeight: FontWeight.bold)),
-          ),
-        )
-      ],
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: Color(0xFF2563EB), width: 1.5),
+        ),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      ),
     );
   }
 }
@@ -333,6 +691,38 @@ class _CustomerPhoneScreenState extends State<CustomerPhoneScreen> {
   late String _selectedOrderId;
   bool _showChat = false;
   final TextEditingController _chatController = TextEditingController();
+  List<LatLng> _clientRoutePoints = [];
+  String? _loadedRouteOrderId;
+
+  void _loadRouteForOrder(Order order) async {
+    if (_loadedRouteOrderId == order.id && _clientRoutePoints.isNotEmpty) return;
+    _loadedRouteOrderId = order.id;
+
+    // Usamos la posición actual del repartidor guardada en Firestore como punto de inicio
+    final start = LatLng(order.currentX, order.currentY);
+    final end = LatLng(order.destLatitude, order.destLongitude);
+
+    final points = await fetchOSRMRoute(start, end);
+    if (points.isNotEmpty) {
+      if (mounted) {
+        setState(() {
+          _clientRoutePoints = points;
+        });
+      }
+    } else {
+      if (mounted) {
+        setState(() {
+          _clientRoutePoints = getFallbackStraightRoute(start, end);
+        });
+      }
+    }
+  }
+
+  void hideChat() {
+    setState(() {
+      _showChat = false;
+    });
+  }
 
   @override
   void initState() {
@@ -359,8 +749,10 @@ class _CustomerPhoneScreenState extends State<CustomerPhoneScreen> {
         passcode: '4829',
         progress: 0.0,
         eta: 8,
-        currentX: 80.0,
-        currentY: 70.0,
+        currentX: 20.3720,
+        currentY: -100.0190,
+        destLatitude: 20.3680,
+        destLongitude: -100.0120,
         chatLogs: [
           {'sender': 'system', 'text': 'Pedido creado en Amazon Prime', 'timestamp': DateTime.now().millisecondsSinceEpoch}
         ],
@@ -377,8 +769,10 @@ class _CustomerPhoneScreenState extends State<CustomerPhoneScreen> {
         passcode: '7721',
         progress: 0.0,
         eta: 12,
-        currentX: 80.0,
-        currentY: 70.0,
+        currentX: 20.3720,
+        currentY: -100.0190,
+        destLatitude: 20.3750,
+        destLongitude: -100.0150,
         chatLogs: [
           {'sender': 'system', 'text': 'Pedido creado en MercadoLibre', 'timestamp': DateTime.now().millisecondsSinceEpoch}
         ],
@@ -395,8 +789,10 @@ class _CustomerPhoneScreenState extends State<CustomerPhoneScreen> {
         passcode: '9083',
         progress: 0.0,
         eta: 6,
-        currentX: 80.0,
-        currentY: 70.0,
+        currentX: 20.3720,
+        currentY: -100.0190,
+        destLatitude: 20.3700,
+        destLongitude: -100.0250,
         chatLogs: [
           {'sender': 'system', 'text': 'Pedido creado en DHL Express', 'timestamp': DateTime.now().millisecondsSinceEpoch}
         ],
@@ -432,6 +828,13 @@ class _CustomerPhoneScreenState extends State<CustomerPhoneScreen> {
               activeOrder = orders.firstWhere((o) => o.id == _selectedOrderId);
             } catch (_) {
               activeOrder = _getFallbackOrder(_selectedOrderId);
+            }
+
+            if (activeOrder.status != 'pending') {
+              _loadRouteForOrder(activeOrder);
+            } else {
+              _clientRoutePoints = [];
+              _loadedRouteOrderId = null;
             }
 
             return Stack(
@@ -492,10 +895,11 @@ class _CustomerPhoneScreenState extends State<CustomerPhoneScreen> {
         children: [
           CircleAvatar(
             backgroundColor: _getBrandColor(order.brand).withOpacity(0.1),
-            radius: 16,
-            child: Text(
-              _getBrandEmoji(order.brand),
-              style: const TextStyle(fontSize: 14),
+            radius: 18,
+            child: Icon(
+              _getBrandIcon(order.brand),
+              color: _getBrandColor(order.brand),
+              size: 18,
             ),
           ),
           Row(
@@ -522,9 +926,9 @@ class _CustomerPhoneScreenState extends State<CustomerPhoneScreen> {
                     fontFamily: 'Roboto',
                   ),
                   items: const [
-                    DropdownMenuItem(value: 'order-1', child: Text('Emmanuel S. (Amazon)')),
-                    DropdownMenuItem(value: 'order-2', child: Text('Sofía L. (MercadoLibre)')),
-                    DropdownMenuItem(value: 'order-3', child: Text('Roberto M. (DHL)')),
+                    DropdownMenuItem(value: 'order-1', child: Text('Servicio: Amazon Prime')),
+                    DropdownMenuItem(value: 'order-2', child: Text('Servicio: MercadoLibre')),
+                    DropdownMenuItem(value: 'order-3', child: Text('Servicio: DHL Express')),
                   ],
                   onChanged: (val) {
                     if (val != null) {
@@ -631,29 +1035,117 @@ class _CustomerPhoneScreenState extends State<CustomerPhoneScreen> {
     final brandColor = _getBrandColor(order.brand);
 
     return ListView(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(20),
       children: [
-        // Map Container
+        // Map Container con diseño tipo Glassmorphism
         Container(
-          height: 250,
+          height: 280,
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: const Color(0xFFE5E7EB)),
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(color: const Color(0xFFECEFF1), width: 1.5),
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withOpacity(0.04),
-                blurRadius: 10,
-                offset: const Offset(0, 4),
+                color: Colors.black.withOpacity(0.06),
+                blurRadius: 20,
+                offset: const Offset(0, 8),
               ),
             ],
           ),
           child: ClipRRect(
-            borderRadius: BorderRadius.circular(20),
+            borderRadius: BorderRadius.circular(24),
             child: Stack(
               children: [
                 Positioned.fill(
-                  child: CustomPaint(
-                    painter: VectorMapPainter(activeOrder: order),
+                  child: FlutterMap(
+                    options: MapOptions(
+                      initialCenter: LatLng(order.currentX, order.currentY),
+                      initialZoom: 15.0,
+                      minZoom: 10,
+                      maxZoom: 18,
+                    ),
+                    children: [
+                      buildMapTileLayer(),
+                      if (_clientRoutePoints.isNotEmpty)
+                        PolylineLayer(
+                          polylines: [
+                            Polyline(
+                              points: _clientRoutePoints,
+                              color: brandColor,
+                              strokeWidth: 4.5,
+                              borderColor: Colors.white,
+                              borderStrokeWidth: 1.5,
+                            ),
+                          ],
+                        ),
+                      MarkerLayer(
+                        markers: [
+                          Marker(
+                            point: LatLng(order.currentX, order.currentY),
+                            width: 44,
+                            height: 44,
+                            child: Container(
+                              decoration: BoxDecoration(
+                                color: Colors.white,
+                                shape: BoxShape.circle,
+                                border: Border.all(color: brandColor, width: 3),
+                                boxShadow: const [
+                                  BoxShadow(
+                                    color: Colors.black26, 
+                                    blurRadius: 6,
+                                    offset: Offset(0, 3)
+                                  )
+                                ],
+                              ),
+                              child: Icon(Icons.motorcycle_rounded, color: brandColor, size: 22),
+                            ),
+                          ),
+                          Marker(
+                            point: LatLng(order.destLatitude, order.destLongitude),
+                            width: 44,
+                            height: 44,
+                            child: Container(
+                              decoration: const BoxDecoration(
+                                color: Colors.white,
+                                shape: BoxShape.circle,
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black12,
+                                    blurRadius: 6,
+                                    offset: Offset(0, 3)
+                                  )
+                                ],
+                              ),
+                              child: const Icon(
+                                Icons.location_on_rounded,
+                                color: Colors.redAccent,
+                                size: 28,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                Positioned(
+                  top: 12,
+                  right: 12,
+                  child: Material(
+                    type: MaterialType.transparency,
+                    child: Tooltip(
+                      message: 'Configurar Mapa',
+                      child: FloatingActionButton.small(
+                        heroTag: 'map_settings_client_${order.id}',
+                        onPressed: () {
+                          showMapSettingsDialog(context, () {
+                            setState(() {});
+                          });
+                        },
+                        backgroundColor: Colors.white,
+                        elevation: 3,
+                        child: const Icon(Icons.layers_rounded, color: Colors.black87, size: 20),
+                      ),
+                    ),
                   ),
                 ),
                 Positioned(
@@ -662,28 +1154,32 @@ class _CustomerPhoneScreenState extends State<CustomerPhoneScreen> {
                   child: Container(
                     decoration: BoxDecoration(
                       color: Colors.white.withOpacity(0.95),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: const Color(0xFFE5E7EB)),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: const Color(0xFFECEFF1)),
+                      boxShadow: const [
+                        BoxShadow(color: Colors.black12, blurRadius: 4, offset: Offset(0, 2))
+                      ]
                     ),
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                     child: Row(
+                      mainAxisSize: MainAxisSize.min,
                       children: [
                         Container(
-                          width: 6,
-                          height: 6,
+                          width: 8,
+                          height: 8,
                           decoration: BoxDecoration(
                             shape: BoxShape.circle,
                             color: brandColor,
                           ),
                         ),
-                        const SizedBox(width: 6),
+                        const SizedBox(width: 8),
                         Text(
                           order.status == 'accepted'
                               ? 'Conductor asignado'
                               : (order.status == 'in_transit' 
                                   ? 'Repartidor en ruta' 
-                                  : (order.status == 'arrived' ? 'Llegó a tu ubicación' : 'Paquete entregado')),
-                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 10, color: Colors.black87),
+                                  : (order.status == 'arrived' ? '¡Llegó a tu destino!' : 'Paquete entregado')),
+                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 11, color: Colors.black87),
                         ),
                       ],
                     ),
@@ -695,11 +1191,69 @@ class _CustomerPhoneScreenState extends State<CustomerPhoneScreen> {
         ),
         const SizedBox(height: 16),
 
-        // Driver details card
+        // Información de entrega y Código de Seguridad (Passcode)
         Container(
           decoration: BoxDecoration(
             color: Colors.white,
-            borderRadius: BorderRadius.circular(18),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: const Color(0xFFE5E7EB)),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.02),
+                blurRadius: 10,
+                offset: const Offset(0, 4),
+              )
+            ],
+          ),
+          padding: const EdgeInsets.all(16),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('Paquete', style: TextStyle(fontSize: 10, color: Colors.black45, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 4),
+                    Text(
+                      order.item,
+                      style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.black87),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                decoration: BoxDecoration(
+                  color: brandColor.withOpacity(0.08),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: brandColor.withOpacity(0.15)),
+                ),
+                child: Column(
+                  children: [
+                    Text(
+                      'CÓDIGO',
+                      style: TextStyle(fontSize: 8, color: brandColor, fontWeight: FontWeight.bold, letterSpacing: 1),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      order.passcode,
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w900, color: brandColor, letterSpacing: 0.5),
+                    )
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+
+        // Tarjeta Premium de Repartidor
+        Container(
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(20),
             border: Border.all(color: const Color(0xFFE5E7EB)),
             boxShadow: [
               BoxShadow(
@@ -712,41 +1266,74 @@ class _CustomerPhoneScreenState extends State<CustomerPhoneScreen> {
           padding: const EdgeInsets.all(16),
           child: Row(
             children: [
-              CircleAvatar(
-                radius: 20,
-                backgroundColor: brandColor.withOpacity(0.1),
-                child: Icon(Icons.electric_moped, color: brandColor, size: 20),
+              FutureBuilder<DocumentSnapshot>(
+                future: FirebaseFirestore.instance.collection('drivers').doc(order.driverId).get(),
+                builder: (context, snapshot) {
+                  String avatarUrl = '';
+                  if (snapshot.hasData && snapshot.data!.exists) {
+                    final data = snapshot.data!.data() as Map<String, dynamic>?;
+                    if (data != null) {
+                      avatarUrl = data['photoUrl'] ?? '';
+                    }
+                  }
+                  return CircleAvatar(
+                    radius: 24,
+                    backgroundColor: brandColor.withOpacity(0.1),
+                    backgroundImage: avatarUrl.isNotEmpty ? NetworkImage(avatarUrl) : null,
+                    child: avatarUrl.isEmpty ? Icon(Icons.person_rounded, color: brandColor, size: 24) : null,
+                  );
+                },
               ),
-              const SizedBox(width: 12),
+              const SizedBox(width: 14),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(order.driverName, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.black87)),
-                    const SizedBox(height: 2),
                     Text(
-                      order.driverVehicle,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 10, color: Colors.black45),
+                      order.driverName, 
+                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Colors.black87)
+                    ),
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        Icon(Icons.electric_moped, size: 12, color: brandColor),
+                        const SizedBox(width: 4),
+                        Expanded(
+                          child: Text(
+                            order.driverVehicle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontSize: 11, color: Colors.black54),
+                          ),
+                        ),
+                      ],
                     ),
                   ],
                 ),
               ),
+              const SizedBox(width: 8),
               IconButton(
                 onPressed: () {},
                 style: IconButton.styleFrom(
-                  backgroundColor: const Color(0xFFF3F4F6),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  backgroundColor: const Color(0xFFF9FAFB),
+                  padding: const EdgeInsets.all(10),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    side: const BorderSide(color: Color(0xFFE5E7EB)),
+                  ),
                 ),
                 icon: Icon(Icons.phone, color: brandColor, size: 18),
               ),
-              const SizedBox(width: 4),
+              const SizedBox(width: 6),
               IconButton(
                 onPressed: () => setState(() => _showChat = true),
                 style: IconButton.styleFrom(
-                  backgroundColor: const Color(0xFFF3F4F6),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  backgroundColor: const Color(0xFFF9FAFB),
+                  padding: const EdgeInsets.all(10),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    side: const BorderSide(color: Color(0xFFE5E7EB)),
+                  ),
                 ),
                 icon: Icon(Icons.chat_bubble_outline, color: brandColor, size: 18),
               ),
@@ -755,11 +1342,11 @@ class _CustomerPhoneScreenState extends State<CustomerPhoneScreen> {
         ),
         const SizedBox(height: 16),
 
-        // Progress card
+        // Progreso de envío
         Container(
           decoration: BoxDecoration(
             color: Colors.white,
-            borderRadius: BorderRadius.circular(18),
+            borderRadius: BorderRadius.circular(20),
             border: Border.all(color: const Color(0xFFE5E7EB)),
             boxShadow: [
               BoxShadow(
@@ -769,7 +1356,7 @@ class _CustomerPhoneScreenState extends State<CustomerPhoneScreen> {
               )
             ],
           ),
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.all(18),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -779,27 +1366,30 @@ class _CustomerPhoneScreenState extends State<CustomerPhoneScreen> {
                   Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text('Código de Orden: #${order.id.split('-').last.toUpperCase()}', style: const TextStyle(fontSize: 9, color: Colors.black45)),
-                      const SizedBox(height: 2),
+                      Text('ORDEN: #${order.id.split('-').last.toUpperCase()}', style: const TextStyle(fontSize: 9, color: Colors.black45, fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 4),
                       Text(
                         _getProgressTitle(order.status), 
-                        style: TextStyle(color: brandColor, fontWeight: FontWeight.bold, fontSize: 14),
+                        style: const TextStyle(color: Colors.black87, fontWeight: FontWeight.bold, fontSize: 15),
                       ),
                     ],
                   ),
                   Column(
                     crossAxisAlignment: CrossAxisAlignment.end,
                     children: [
-                      const Text('Tiempo Estimado', style: TextStyle(fontSize: 9, color: Colors.black45)),
-                      const SizedBox(height: 2),
-                      Text('${order.eta} min', style: TextStyle(color: brandColor, fontWeight: FontWeight.bold, fontSize: 14)),
+                      const Text('Llegada estimada', style: TextStyle(fontSize: 9, color: Colors.black45, fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 4),
+                      Text(
+                        '${order.eta} min', 
+                        style: TextStyle(color: brandColor, fontWeight: FontWeight.w800, fontSize: 16),
+                      ),
                     ],
                   )
                 ],
               ),
-              const SizedBox(height: 20),
+              const SizedBox(height: 24),
               
-              // Horizontal Stepper Bar
+              // Stepper Lineal Premium
               _buildStepper(order.status, brandColor),
             ],
           ),
@@ -825,31 +1415,37 @@ class _CustomerPhoneScreenState extends State<CustomerPhoneScreen> {
       activeStep = 3;
     }
 
-    Widget stepNode(int stepIndex, String title) {
+    Widget stepNode(int stepIndex, String title, IconData icon) {
       bool isDone = stepIndex <= activeStep;
+      bool isCurrent = stepIndex == activeStep;
       return Column(
         children: [
           Container(
-            width: 14,
-            height: 14,
+            width: 32,
+            height: 32,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: isDone ? brandColor : const Color(0xFFE5E7EB),
+              color: isDone ? brandColor : const Color(0xFFF3F4F6),
               border: Border.all(
-                color: isDone ? Colors.white : const Color(0xFFCBD5E1),
-                width: 1.5,
+                color: isDone ? Colors.white : const Color(0xFFE5E7EB),
+                width: 2.0,
               ),
               boxShadow: isDone 
-                  ? [BoxShadow(color: brandColor.withOpacity(0.3), blurRadius: 4, spreadRadius: 1)]
+                  ? [BoxShadow(color: brandColor.withOpacity(0.25), blurRadius: 6, offset: const Offset(0, 3))]
                   : [],
             ),
+            child: Icon(
+              icon,
+              size: 14,
+              color: isDone ? Colors.white : Colors.black38,
+            ),
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 8),
           Text(
             title, 
             style: TextStyle(
-              fontSize: 8.5, 
-              color: isDone ? Colors.black87 : Colors.black38, 
+              fontSize: 9.5, 
+              color: isCurrent ? brandColor : (isDone ? Colors.black87 : Colors.black38), 
               fontWeight: isDone ? FontWeight.bold : FontWeight.normal
             )
           ),
@@ -863,25 +1459,25 @@ class _CustomerPhoneScreenState extends State<CustomerPhoneScreen> {
           alignment: Alignment.center,
           children: [
             Container(
-              height: 3,
-              margin: const EdgeInsets.symmetric(horizontal: 10),
+              height: 4,
+              margin: const EdgeInsets.symmetric(horizontal: 20),
               decoration: BoxDecoration(
-                color: const Color(0xFFE5E7EB), 
-                borderRadius: BorderRadius.circular(2)
+                color: const Color(0xFFF3F4F6), 
+                borderRadius: BorderRadius.circular(4)
               ),
             ),
             Positioned(
-              left: 10,
-              right: 10,
+              left: 20,
+              right: 20,
               child: Align(
                 alignment: Alignment.centerLeft,
                 child: FractionallySizedBox(
                   widthFactor: progressWidth,
                   child: Container(
-                    height: 3,
+                    height: 4,
                     decoration: BoxDecoration(
                       color: brandColor, 
-                      borderRadius: BorderRadius.circular(2),
+                      borderRadius: BorderRadius.circular(4),
                     ),
                   ),
                 ),
@@ -889,14 +1485,14 @@ class _CustomerPhoneScreenState extends State<CustomerPhoneScreen> {
             ),
           ],
         ),
-        const SizedBox(height: 8),
+        const SizedBox(height: 12),
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            stepNode(0, 'Aceptado'),
-            stepNode(1, 'En Camino'),
-            stepNode(2, 'Llegó'),
-            stepNode(3, 'Entregado'),
+            stepNode(0, 'Aceptado', Icons.receipt_long_rounded),
+            stepNode(1, 'En Camino', Icons.motorcycle_rounded),
+            stepNode(2, 'Llegó', Icons.pin_drop_rounded),
+            stepNode(3, 'Entregado', Icons.done_all_rounded),
           ],
         )
       ],
@@ -907,6 +1503,12 @@ class _CustomerPhoneScreenState extends State<CustomerPhoneScreen> {
     if (brand.contains('Amazon')) return '📦';
     if (brand.contains('MercadoLibre')) return '💛';
     return '⚡';
+  }
+
+  IconData _getBrandIcon(String brand) {
+    if (brand.contains('Amazon')) return Icons.shopping_bag_rounded;
+    if (brand.contains('MercadoLibre')) return Icons.shopping_cart_rounded;
+    return Icons.local_shipping_rounded;
   }
 
   String _getProgressTitle(String status) {
@@ -972,10 +1574,10 @@ Widget _buildChatOverlay(Order order, FirestoreService service, String role) {
                         // Since this is drawn conditionally in parent, parent manages visibility
                         if (role == 'client') {
                           final pState = context.findAncestorStateOfType<_CustomerPhoneScreenState>();
-                          pState?.setState(() => pState._showChat = false);
+                          pState?.hideChat();
                         } else {
                           final pState = context.findAncestorStateOfType<_RiderDashboardScreenState>();
-                          pState?.setState(() => pState._showChat = false);
+                          pState?.hideChat();
                         }
                       },
                       style: IconButton.styleFrom(backgroundColor: Colors.white),
@@ -1203,14 +1805,18 @@ class _PulsingRadarState extends State<PulsingRadar> with SingleTickerProviderSt
 // Rider Dashboard Screen (Adapted for responsive layout and chat sync)
 // ----------------------------------------------------------------------------
 class RiderDashboardScreen extends StatefulWidget {
+  final AppUser appUser;
   final VoidCallback onLogout;
 
-  const RiderDashboardScreen({super.key, required this.onLogout});
+  const RiderDashboardScreen({
+    super.key,
+    required this.appUser,
+    required this.onLogout,
+  });
 
   @override
   State<RiderDashboardScreen> createState() => _RiderDashboardScreenState();
 }
-
 class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
   String? _selectedOrderId;
   final Map<String, Timer> _routeTimers = {};
@@ -1218,6 +1824,86 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
   final TextEditingController _codeController = TextEditingController();
   bool _codeError = false;
   bool _showChat = false; // Chat Overlay status
+  StreamSubscription<Position>? _positionStreamSubscription;
+  List<LatLng> _riderRoutePoints = [];
+  String? _riderLoadedRouteOrderId;
+
+  void _loadRouteForRider(Order order) async {
+    if (_riderLoadedRouteOrderId == order.id && _riderRoutePoints.isNotEmpty) return;
+    _riderLoadedRouteOrderId = order.id;
+
+    // Intentar obtener posición GPS real; si falla, usar la posición guardada del pedido
+    LatLng start;
+    try {
+      final pos = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+        timeLimit: const Duration(seconds: 4),
+      );
+      start = LatLng(pos.latitude, pos.longitude);
+    } catch (_) {
+      start = LatLng(order.currentX, order.currentY);
+    }
+    final end = LatLng(order.destLatitude, order.destLongitude);
+
+    final points = await fetchOSRMRoute(start, end);
+    if (points.isNotEmpty) {
+      if (mounted) {
+        setState(() {
+          _riderRoutePoints = points;
+        });
+      }
+    } else {
+      if (mounted) {
+        setState(() {
+          _riderRoutePoints = getFallbackStraightRoute(start, end);
+        });
+      }
+    }
+  }
+
+  void hideChat() {
+    setState(() {
+      _showChat = false;
+    });
+  }
+
+  Future<bool> _handleLocationPermission() async {
+    bool serviceEnabled;
+    LocationPermission permission;
+
+    serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Servicio de ubicación desactivado. Usando simulación de respaldo.')),
+        );
+      }
+      return false;
+    }
+
+    permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Permisos de ubicación denegados. Usando simulación.')),
+          );
+        }
+        return false;
+      }
+    }
+    
+    if (permission == LocationPermission.deniedForever) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Permisos denegados permanentemente. Usando simulación.')),
+        );
+      }
+      return false;
+    }
+    return true;
+  }
 
   final Map<String, List<Map<String, double>>> _routes = {
     'order-1': [
@@ -1245,7 +1931,16 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
   };
 
   @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _handleLocationPermission();
+    });
+  }
+
+  @override
   void dispose() {
+    _positionStreamSubscription?.cancel();
     for (var timer in _routeTimers.values) {
       timer.cancel();
     }
@@ -1254,28 +1949,157 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
     super.dispose();
   }
 
-  void _startGPSRoute(Order order, FirestoreService service) {
+  double _calculateDistance(double lat1, double lon1, double lat2, double lon2) {
+    const double p = 0.017453292519943295; // pi / 180
+    final double a = 0.5 - math.cos((lat2 - lat1) * p) / 2 +
+        math.cos(lat1 * p) * math.cos(lat2 * p) *
+            (1 - math.cos((lon2 - lon1) * p)) / 2;
+    return 12742 * math.asin(math.sqrt(a)) * 1000; // 2 * R * asin(sqrt(a)) in meters
+  }
+
+  void _startGPSRoute(Order order, FirestoreService service) async {
+    // Si ya hay una ruta activa (sea de GPS real o simulación), no hacer nada
+    if (_positionStreamSubscription != null || _routeTimers[order.id]?.isActive == true) return;
+
+    // Actualizar estado del pedido a en tránsito
+    service.updateOrderStatus(order.id, 'in_transit');
+
+    // Intentar obtener permisos de ubicación
+    final hasPermission = await _handleLocationPermission();
+    if (!hasPermission) {
+      // Usar simulación de respaldo si no hay permisos
+      _startSimulatedRouteFallback(order, service);
+      return;
+    }
+
+    Position? startPosition;
+    try {
+      startPosition = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+        timeLimit: const Duration(seconds: 5),
+      );
+    } catch (e) {
+      debugPrint("Error getting current position: $e. Using fallback simulation.");
+      _startSimulatedRouteFallback(order, service);
+      return;
+    }
+
+    final double startLat = startPosition.latitude;
+    final double startLon = startPosition.longitude;
+
+    // Escribir posición real del repartidor en Firestore INMEDIATAMENTE
+    // para que el cliente vea el punto de inicio correcto en su mapa
+    service.updateOrderTracking(
+      order.id,
+      currentX: startLat,
+      currentY: startLon,
+      progress: order.progress,
+      eta: order.eta,
+    );
+
+    // Destino real de la entrega en Firestore (se obtiene del documento del pedido)
+    final double destLat = order.destLatitude;
+    final double destLon = order.destLongitude;
+
+    // Distancia total real en metros
+    final double totalDistance = _calculateDistance(startLat, startLon, destLat, destLon);
+
+    // Configurar el stream del GPS real
+    const LocationSettings locationSettings = LocationSettings(
+      accuracy: LocationAccuracy.high,
+      distanceFilter: 2, // Actualiza cada 2 metros de movimiento
+    );
+
+    _positionStreamSubscription = Geolocator.getPositionStream(locationSettings: locationSettings).listen((Position position) {
+      final double currentLat = position.latitude;
+      final double currentLon = position.longitude;
+
+      // Calcular distancia restante al destino
+      final double distToDest = _calculateDistance(currentLat, currentLon, destLat, destLon);
+
+      // Calcular distancia y progreso real (0.0 a 100.0)
+      final double distFromStart = _calculateDistance(startLat, startLon, currentLat, currentLon);
+      double progressPercent = totalDistance > 0 ? (distFromStart / totalDistance) * 100.0 : 0.0;
+      progressPercent = progressPercent.clamp(0.0, 100.0);
+
+      // Calcular ETA dinámico
+      double speed = position.speed;
+      if (speed < 0.5) speed = 1.4; // 1.4 m/s caminando por defecto
+      
+      final int remainingMinutes = (distToDest / speed / 60.0).round();
+
+      // Guardamos la latitud actual en currentX y la longitud en currentY en Firestore
+      service.updateOrderTracking(
+        order.id,
+        currentX: currentLat,
+        currentY: currentLon,
+        progress: progressPercent,
+        eta: remainingMinutes,
+      );
+
+      // Si el repartidor está a menos de 10 metros del destino real
+      if (distToDest < 10.0 || progressPercent >= 98.0) {
+        _positionStreamSubscription?.cancel();
+        _positionStreamSubscription = null;
+        service.updateOrderStatus(order.id, 'arrived');
+        service.updateOrderTracking(
+          order.id,
+          currentX: destLat,
+          currentY: destLon,
+          progress: 100.0,
+          eta: 0,
+        );
+      }
+    }, onError: (err) {
+      debugPrint("Error in location stream: $err. Switching to fallback.");
+      _positionStreamSubscription?.cancel();
+      _positionStreamSubscription = null;
+      _startSimulatedRouteFallback(order, service);
+    });
+  }
+
+  void _startSimulatedRouteFallback(Order order, FirestoreService service) async {
     if (_routeTimers[order.id]?.isActive == true) return;
     
     _routeSteps[order.id] = 0;
     
     service.updateOrderStatus(order.id, 'in_transit');
 
-    final pathPoints = _routes[order.id] ?? [];
-    if (pathPoints.isEmpty) return;
+    // Punto de inicio: intentar GPS real; si falla, usar posición actual guardada en el pedido
+    LatLng start;
+    try {
+      final pos = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.medium,
+        timeLimit: const Duration(seconds: 4),
+      );
+      start = LatLng(pos.latitude, pos.longitude);
+    } catch (_) {
+      // Usar última posición conocida del repartidor almacenada en Firestore
+      start = LatLng(order.currentX, order.currentY);
+    }
+    final end = LatLng(order.destLatitude, order.destLongitude);
 
-    const int totalSteps = 45;
-    _routeTimers[order.id] = Timer.periodic(const Duration(milliseconds: 400), (timer) async {
+    // Obtener ruta real de OSRM o recurrir al respaldo en línea recta
+    List<LatLng> routePoints = await fetchOSRMRoute(start, end);
+    if (routePoints.isEmpty) {
+      routePoints = getFallbackStraightRoute(start, end);
+    }
+
+    final int totalSteps = routePoints.length;
+    // Ajustar duración por paso para que dure ~20 segundos en total (mínimo 150ms, máximo 1000ms por paso)
+    final int stepDurationMs = (20000 / totalSteps).round().clamp(150, 1000);
+
+    _routeTimers[order.id] = Timer.periodic(Duration(milliseconds: stepDurationMs), (timer) async {
       int currentStep = _routeSteps[order.id] ?? 0;
-      if (currentStep >= totalSteps) {
+      if (currentStep >= totalSteps - 1) {
         timer.cancel();
         _routeTimers.remove(order.id);
         _routeSteps.remove(order.id);
         service.updateOrderStatus(order.id, 'arrived');
         service.updateOrderTracking(
           order.id,
-          currentX: pathPoints.last['x']!,
-          currentY: pathPoints.last['y']!,
+          currentX: end.latitude,
+          currentY: end.longitude,
           progress: 100.0,
           eta: 0,
         );
@@ -1285,27 +2109,24 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
       currentStep++;
       _routeSteps[order.id] = currentStep;
       
-      final double progressPercent = (currentStep / totalSteps);
-      final int segmentCount = pathPoints.length - 1;
-      final double exactSegment = progressPercent * segmentCount;
-      final int currentSegmentIdx = exactSegment.floor();
-      final double t = exactSegment - currentSegmentIdx;
-
-      if (currentSegmentIdx >= segmentCount) return;
-
-      final pStart = pathPoints[currentSegmentIdx];
-      final pEnd = pathPoints[currentSegmentIdx + 1];
-
-      final double rx = pStart['x']! + (pEnd['x']! - pStart['x']!) * t;
-      final double ry = pStart['y']! + (pEnd['y']! - pStart['y']!) * t;
+      final LatLng currentPos = routePoints[currentStep];
+      final double progressPercent = (currentStep / (totalSteps - 1)) * 100.0;
       
-      final int remainingMinutes = ((1.0 - progressPercent) * 8).round() + 1;
+      // Calcular ETA dinámico basado en distancia restante
+      final double remainingDistance = _calculateDistance(
+        currentPos.latitude,
+        currentPos.longitude,
+        end.latitude,
+        end.longitude,
+      );
+      // Asumimos velocidad promedio de 30 km/h (8.3 m/s) para el repartidor
+      final int remainingMinutes = (remainingDistance / 8.3 / 60.0).round().clamp(1, 15);
 
       service.updateOrderTracking(
         order.id,
-        currentX: rx,
-        currentY: ry,
-        progress: progressPercent * 100.0,
+        currentX: currentPos.latitude,
+        currentY: currentPos.longitude,
+        progress: progressPercent,
         eta: remainingMinutes,
       );
     });
@@ -1339,13 +2160,15 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
       appBar: AppBar(
         backgroundColor: Colors.white,
         elevation: 0,
-        title: const FittedBox(
+        title: FittedBox(
           fit: BoxFit.scaleDown,
           child: Row(
             mainAxisSize: MainAxisSize.min,
-            children: [
+            children: const [
+              Icon(Icons.navigation_outlined, color: Color(0xFF10B981), size: 20),
+              SizedBox(width: 6),
               Text(
-                '📍 DelivEcosys',
+                'DelivEcosys',
                 style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: Color(0xFF10B981)),
               ),
               SizedBox(width: 8),
@@ -1374,92 +2197,127 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
           )
         ],
       ),
-      body: StreamBuilder<List<Order>>(
-        stream: firestoreService.getOrdersStream(),
-        builder: (context, snapshot) {
+      body: StreamBuilder<DocumentSnapshot>(
+        stream: FirebaseFirestore.instance.collection('drivers').doc(widget.appUser.uid).snapshots(),
+        builder: (context, driverSnap) {
+          if (driverSnap.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (!driverSnap.hasData || !driverSnap.data!.exists) {
+            return const Center(
+              child: Text(
+                'No se encontró información de tu repartidor.\nContacta al Administrador.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold),
+              ),
+            );
+          }
+          final driverData = driverSnap.data!.data() as Map<String, dynamic>;
+          final driver = Driver.fromMap(widget.appUser.uid, driverData);
+
+          return StreamBuilder<List<Order>>(
+            stream: firestoreService.getOrdersStream(),
+            builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Center(child: CircularProgressIndicator());
           }
 
-          final orders = snapshot.data ?? [];
-          final activeRoutes = orders.where((o) => o.status != 'pending' && o.status != 'delivered').toList();
+              final allOrders = snapshot.data ?? [];
+              
+              // Filtrar pedidos para mostrar:
+              // 1. Pedidos sin asignar ('pending')
+              // 2. Pedidos asignados a este repartidor
+              final orders = allOrders.where((o) {
+                return o.status == 'pending' || o.driverId == widget.appUser.uid;
+              }).toList();
 
-          if (activeRoutes.isNotEmpty) {
-            if (_selectedOrderId == null || !activeRoutes.any((o) => o.id == _selectedOrderId)) {
-              _selectedOrderId = activeRoutes.first.id;
-            }
-          } else {
-            _selectedOrderId = null;
-          }
-          
-          Order? selectedOrder;
-          if (_selectedOrderId != null) {
-            try {
-              selectedOrder = orders.firstWhere((o) => o.id == _selectedOrderId);
-            } catch (_) {
-              selectedOrder = null;
-            }
-          }
+              final activeRoutes = orders.where((o) => o.status != 'pending' && o.status != 'delivered').toList();
 
-          // Responsive Layout Builder
-          return LayoutBuilder(
-            builder: (context, constraints) {
-              bool isTablet = constraints.maxWidth >= 600;
-
-              if (isTablet) {
-                // Side-by-side tablet layout
-                return Stack(
-                  children: [
-                    Row(
-                      children: [
-                        // Left sidebar: orders and operations
-                        SizedBox(
-                          width: 320,
-                          child: _buildSidebar(orders, activeRoutes, selectedOrder, firestoreService),
-                        ),
-                        // Right map view
-                        Expanded(
-                          child: _buildMapArea(orders, selectedOrder),
-                        ),
-                      ],
-                    ),
-                    if (_showChat && selectedOrder != null)
-                      _buildChatOverlay(selectedOrder, firestoreService, 'driver'),
-                  ],
-                );
+              if (activeRoutes.isNotEmpty) {
+                if (_selectedOrderId == null || !activeRoutes.any((o) => o.id == _selectedOrderId)) {
+                  _selectedOrderId = activeRoutes.first.id;
+                }
               } else {
-                // Tabbed mobile layout
-                return DefaultTabController(
-                  length: 2,
-                  child: Stack(
-                    children: [
-                      Column(
+                _selectedOrderId = null;
+              }
+              
+              Order? selectedOrder;
+              if (_selectedOrderId != null) {
+                try {
+                  selectedOrder = orders.firstWhere((o) => o.id == _selectedOrderId);
+                } catch (_) {
+                  selectedOrder = null;
+                }
+              }
+
+              if (selectedOrder != null) {
+                _loadRouteForRider(selectedOrder);
+              } else {
+                _riderRoutePoints = [];
+                _riderLoadedRouteOrderId = null;
+              }
+
+              // Responsive Layout Builder
+              return LayoutBuilder(
+                builder: (context, constraints) {
+                  bool isTablet = constraints.maxWidth >= 600;
+
+                  if (isTablet) {
+                    // Side-by-side tablet layout
+                    return Stack(
+                      children: [
+                        Row(
+                          children: [
+                            // Left sidebar: orders and operations
+                            SizedBox(
+                              width: 320,
+                              child: _buildSidebar(orders, activeRoutes, selectedOrder, firestoreService, driver),
+                            ),
+                            // Right map view
+                            Expanded(
+                              child: _buildMapArea(allOrders, selectedOrder),
+                            ),
+                          ],
+                        ),
+                        if (_showChat && selectedOrder != null)
+                          _buildChatOverlay(selectedOrder, firestoreService, 'driver'),
+                      ],
+                    );
+                  } else {
+                    // Tabbed mobile layout
+                    return DefaultTabController(
+                      length: 2,
+                      child: Stack(
                         children: [
-                          const TabBar(
-                            labelColor: Color(0xFF10B981),
-                            unselectedLabelColor: Colors.black45,
-                            indicatorColor: Color(0xFF10B981),
-                            tabs: [
-                              Tab(icon: Icon(Icons.list_alt), text: 'Pedidos'),
-                              Tab(icon: Icon(Icons.navigation_outlined), text: 'Navegación'),
+                          Column(
+                            children: [
+                              const TabBar(
+                                labelColor: Color(0xFF10B981),
+                                unselectedLabelColor: Colors.black45,
+                                indicatorColor: Color(0xFF10B981),
+                                tabs: [
+                                  Tab(icon: Icon(Icons.list_alt), text: 'Pedidos'),
+                                  Tab(icon: Icon(Icons.navigation_outlined), text: 'Navegación'),
+                                ],
+                              ),
+                              Expanded(
+                                child: TabBarView(
+                                  children: [
+                                    _buildSidebar(orders, activeRoutes, selectedOrder, firestoreService, driver, fullWidth: true),
+                                    _buildMapArea(allOrders, selectedOrder),
+                                  ],
+                                ),
+                              ),
                             ],
                           ),
-                          Expanded(
-                            child: TabBarView(
-                              children: [
-                                _buildSidebar(orders, activeRoutes, selectedOrder, firestoreService, fullWidth: true),
-                                _buildMapArea(orders, selectedOrder),
-                              ],
-                            ),
-                          ),
+                          if (_showChat && selectedOrder != null)
+                            _buildChatOverlay(selectedOrder, firestoreService, 'driver'),
                         ],
                       ),
-                      if (_showChat && selectedOrder != null)
-                        _buildChatOverlay(selectedOrder, firestoreService, 'driver'),
-                    ],
-                  ),
-                );
-              }
+                    );
+                  }
+                },
+              );
             },
           );
         },
@@ -1472,6 +2330,7 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
     List<Order> activeRoutes, 
     Order? selectedOrder, 
     FirestoreService firestoreService,
+    Driver driver,
     {bool fullWidth = false}
   ) {
     return Container(
@@ -1560,14 +2419,36 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
                         const SizedBox(height: 8),
                         Text('Pedido: #${order.id.split('-').last.toUpperCase()}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
                         const SizedBox(height: 4),
-                        Text('📦 Producto: ${order.item}', style: const TextStyle(fontSize: 12, color: Colors.black87)),
-                        Text('👤 Cliente: ${order.client}', style: const TextStyle(fontSize: 12, color: Colors.black87)),
+                        Row(
+                          children: [
+                            const Icon(Icons.shopping_bag_outlined, size: 14, color: Colors.black54),
+                            const SizedBox(width: 6),
+                            Text('Producto: ${order.item}', style: const TextStyle(fontSize: 12, color: Colors.black87)),
+                          ],
+                        ),
+                        const SizedBox(height: 2),
+                        Row(
+                          children: [
+                            const Icon(Icons.person_outline, size: 14, color: Colors.black54),
+                            const SizedBox(width: 6),
+                            Text('Cliente: ${order.client}', style: const TextStyle(fontSize: 12, color: Colors.black87)),
+                          ],
+                        ),
                         const SizedBox(height: 10),
                         if (order.status == 'pending')
                           SizedBox(
                             width: double.infinity,
                             child: FilledButton(
-                              onPressed: () => firestoreService.updateOrderStatus(order.id, 'accepted'),
+                              onPressed: () {
+                                firestoreService.assignDriverToOrder(
+                                  order.id,
+                                  driverId: driver.uid,
+                                  driverName: driver.name,
+                                  driverVehicle: '${driver.vehicle} (${driver.plate})',
+                                );
+                                Provider.of<AuthService>(context, listen: false)
+                                    .updateDriverStatus(driver.uid, 'busy');
+                              },
                               style: FilledButton.styleFrom(
                                 backgroundColor: const Color(0xFF10B981),
                                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
@@ -1619,7 +2500,7 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
                       border: OutlineInputBorder(),
                     ),
                     items: activeRoutes.map((o) {
-                      return DropdownMenuItem(
+                      return DropdownMenuItem<String>(
                         value: o.id,
                         child: Text('${o.brand} (${o.client})', style: const TextStyle(fontSize: 12)),
                       );
@@ -1665,7 +2546,7 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
                     SizedBox(
                       width: double.infinity,
                       child: FilledButton(
-                        onPressed: () => _startGPSRoute(selectedOrder!, firestoreService),
+                        onPressed: () => _startGPSRoute(selectedOrder, firestoreService),
                         style: FilledButton.styleFrom(
                           backgroundColor: const Color(0xFF10B981),
                           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
@@ -1678,7 +2559,7 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
                       width: double.infinity,
                       child: FilledButton(
                         onPressed: () {
-                          _routeTimers[selectedOrder!.id]?.cancel();
+                          _routeTimers[selectedOrder.id]?.cancel();
                           _routeTimers.remove(selectedOrder.id);
                           _routeSteps.remove(selectedOrder.id);
                           firestoreService.updateOrderStatus(selectedOrder.id, 'arrived');
@@ -1736,8 +2617,10 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
                                 height: 38,
                                 child: FilledButton(
                                   onPressed: () {
-                                    if (_codeController.text == selectedOrder!.passcode) {
+                                    if (_codeController.text == selectedOrder.passcode) {
                                       firestoreService.updateOrderStatus(selectedOrder.id, 'delivered');
+                                      Provider.of<AuthService>(context, listen: false)
+                                          .updateDriverStatus(driver.uid, 'available');
                                       setState(() {
                                         _codeError = false;
                                         _codeController.clear();
@@ -1762,7 +2645,17 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
                           if (_codeError)
                             const Padding(
                               padding: EdgeInsets.only(top: 6.0),
-                              child: Text('❌ Código OTP incorrecto.', style: TextStyle(color: Colors.red, fontSize: 10, fontWeight: FontWeight.bold)),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(Icons.error_outline, color: Colors.red, size: 14),
+                                  SizedBox(width: 4),
+                                  Text(
+                                    'Código OTP incorrecto.',
+                                    style: TextStyle(color: Colors.red, fontSize: 10, fontWeight: FontWeight.bold),
+                                  ),
+                                ],
+                              ),
                             )
                         ],
                       ),
@@ -1776,27 +2669,134 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
   }
 
   Widget _buildMapArea(List<Order> orders, Order? selectedOrder) {
+    // Si hay un pedido seleccionado, centrar en la ubicación del repartidor. Si no, en la bodega.
+    final LatLng initialCenter = selectedOrder != null
+        ? LatLng(selectedOrder.currentX, selectedOrder.currentY)
+        : const LatLng(20.3720, -100.0190);
+
     return Stack(
       children: [
         Positioned.fill(
-          child: CustomPaint(
-            painter: VectorMapPainter(
-              activeOrder: selectedOrder,
-              allOrders: orders,
+          child: FlutterMap(
+            options: MapOptions(
+              initialCenter: initialCenter,
+              initialZoom: selectedOrder != null ? 15.0 : 13.5,
+              minZoom: 10,
+              maxZoom: 18,
+            ),
+            children: [
+              buildMapTileLayer(),
+              if (selectedOrder != null && _riderRoutePoints.isNotEmpty)
+                PolylineLayer(
+                  polylines: [
+                    Polyline(
+                      points: _riderRoutePoints,
+                      color: _getBrandColor(selectedOrder.brand),
+                      strokeWidth: 4.0,
+                      borderColor: Colors.white,
+                      borderStrokeWidth: 1.0,
+                    ),
+                  ],
+                ),
+              MarkerLayer(
+                markers: [
+                  // Si no hay pedido seleccionado, mostrar TODOS los destinos de pedidos disponibles
+                  if (selectedOrder == null)
+                    ...orders.map((o) {
+                      final isPending = o.status == 'pending';
+                      final color = _getBrandColor(o.brand);
+                      return Marker(
+                        point: LatLng(o.destLatitude, o.destLongitude),
+                        width: 30,
+                        height: 30,
+                        child: Icon(
+                          Icons.location_on_rounded,
+                          color: isPending ? color : Colors.grey,
+                          size: 24,
+                        ),
+                      );
+                    })
+                  else ...[
+                    // Conductor/Repartidor
+                    Marker(
+                      point: LatLng(selectedOrder.currentX, selectedOrder.currentY),
+                      width: 36,
+                      height: 36,
+                      child: Container(
+                        decoration: const BoxDecoration(
+                          color: Colors.white,
+                          shape: BoxShape.circle,
+                          boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 4)],
+                        ),
+                        child: Icon(
+                          Icons.motorcycle_rounded,
+                          color: _getBrandColor(selectedOrder.brand),
+                          size: 20,
+                        ),
+                      ),
+                    ),
+                    // Destino (Casa Cliente)
+                    Marker(
+                      point: LatLng(selectedOrder.destLatitude, selectedOrder.destLongitude),
+                      width: 36,
+                      height: 36,
+                      child: Icon(
+                        Icons.location_on_rounded,
+                        color: _getBrandColor(selectedOrder.brand),
+                        size: 28,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ],
+          ),
+        ),
+        Positioned(
+          top: 12,
+          right: 12,
+          child: Material(
+            type: MaterialType.transparency,
+            child: Tooltip(
+              message: 'Configurar Mapa',
+              child: FloatingActionButton.small(
+                heroTag: selectedOrder != null
+                    ? 'map_settings_rider_${selectedOrder.id}'
+                    : 'map_settings_rider_none',
+                onPressed: () {
+                  showMapSettingsDialog(context, () {
+                    setState(() {});
+                  });
+                },
+                backgroundColor: Colors.white.withOpacity(0.9),
+                elevation: 2,
+                child: const Icon(Icons.layers_rounded, color: Colors.black87, size: 20),
+              ),
             ),
           ),
         ),
         if (selectedOrder == null)
-          const Center(
+          const Positioned(
+            bottom: 16,
+            left: 16,
+            right: 16,
             child: Card(
               color: Colors.white,
               surfaceTintColor: Colors.white,
               elevation: 4,
               child: Padding(
-                padding: EdgeInsets.all(16.0),
-                child: Text(
-                  'Acepta un pedido disponible para ver la ruta optimizada',
-                  style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey, fontSize: 12),
+                padding: EdgeInsets.symmetric(horizontal: 16.0, vertical: 12.0),
+                child: Row(
+                  children: [
+                    Icon(Icons.info_outline, color: Color(0xFF10B981), size: 18),
+                    SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Acepta un pedido disponible para iniciar el rastreo GPS en tiempo real.',
+                        style: TextStyle(color: Colors.black54, fontSize: 11, fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -1821,20 +2821,1241 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Row(
+                  Row(
                     children: [
-                      Icon(Icons.navigation, color: Color(0xFF10B981), size: 16),
-                      SizedBox(width: 6),
-                      Text('Gira a la derecha en 100 metros', style: TextStyle(color: Color(0xFF047857), fontWeight: FontWeight.bold, fontSize: 13)),
+                      const Icon(Icons.navigation, color: Color(0xFF10B981), size: 16),
+                      const SizedBox(width: 6),
+                      Text('Ruta activa hacia cliente: ${selectedOrder.client}', style: const TextStyle(color: Color(0xFF047857), fontWeight: FontWeight.bold, fontSize: 13)),
                     ],
                   ),
                   const SizedBox(height: 2),
-                  Text('Ruta de entrega hacia domicilio de ${selectedOrder.client}', style: const TextStyle(color: Colors.grey, fontSize: 10)),
+                  const Text('Sigue la ruta en el mapa real usando tu ubicación GPS.', style: TextStyle(color: Colors.grey, fontSize: 10)),
                 ],
               ),
             ),
           )
       ],
     );
+  }
+}
+
+// ----------------------------------------------------------------------------
+// Admin Panel Screen — Gestiona repartidores y asignación de pedidos (Colores claros y sin emojis)
+// ----------------------------------------------------------------------------
+class AdminPanelScreen extends StatefulWidget {
+  final AppUser appUser;
+  const AdminPanelScreen({super.key, required this.appUser});
+
+  @override
+  State<AdminPanelScreen> createState() => _AdminPanelScreenState();
+}
+
+class _AdminPanelScreenState extends State<AdminPanelScreen> with SingleTickerProviderStateMixin {
+  late TabController _tabController;
+  final _formKey = GlobalKey<FormState>();
+  
+  // Controladores de formulario
+  final _nameController = TextEditingController();
+  final _emailController = TextEditingController();
+  final _passwordController = TextEditingController();
+  final _phoneController = TextEditingController();
+  final _vehicleController = TextEditingController();
+  final _plateController = TextEditingController();
+  
+  bool _isCreatingDriver = false;
+  String? _errorMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    _tabController = TabController(length: 2, vsync: this);
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    _nameController.dispose();
+    _emailController.dispose();
+    _passwordController.dispose();
+    _phoneController.dispose();
+    _vehicleController.dispose();
+    _plateController.dispose();
+    super.dispose();
+  }
+
+  void _showAddDriverDialog() {
+    _nameController.clear();
+    _emailController.clear();
+    _passwordController.clear();
+    _phoneController.clear();
+    _vehicleController.clear();
+    _plateController.clear();
+    setState(() => _errorMessage = null);
+
+    String selectedVehicleType = 'Motocicleta';
+    String selectedPhotoUrl = '';
+
+    // Lista de avatares predeterminados súper profesionales de ejemplo
+    final listAvatars = [
+      'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=150',
+      'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&q=80&w=150',
+      'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?auto=format&fit=crop&q=80&w=150',
+      'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&q=80&w=150',
+    ];
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              backgroundColor: Colors.white,
+              surfaceTintColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              title: const Text(
+                'Registrar Nuevo Repartidor',
+                style: TextStyle(color: Colors.black87, fontWeight: FontWeight.bold, fontSize: 18),
+              ),
+              content: SingleChildScrollView(
+                child: Form(
+                  key: _formKey,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (_errorMessage != null)
+                        Container(
+                          margin: const EdgeInsets.only(bottom: 16),
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: Colors.red.withOpacity(0.1),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: Colors.redAccent.withOpacity(0.3)),
+                          ),
+                          child: Text(
+                            _errorMessage!,
+                            style: const TextStyle(color: Colors.redAccent, fontSize: 12),
+                          ),
+                        ),
+                      
+                      // Selector de foto de perfil
+                      const Text(
+                        'Foto de Perfil (Opcional)',
+                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.black54),
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          CircleAvatar(
+                            radius: 28,
+                            backgroundColor: Colors.grey.shade100,
+                            backgroundImage: selectedPhotoUrl.isNotEmpty ? NetworkImage(selectedPhotoUrl) : null,
+                            child: selectedPhotoUrl.isEmpty ? const Icon(Icons.person, color: Colors.grey, size: 28) : null,
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'Elige una imagen ilustrativa:',
+                                  style: TextStyle(fontSize: 10, color: Colors.black45),
+                                ),
+                                const SizedBox(height: 4),
+                                SingleChildScrollView(
+                                  scrollDirection: Axis.horizontal,
+                                  child: Row(
+                                    children: listAvatars.map((url) {
+                                      final isSelected = selectedPhotoUrl == url;
+                                      return GestureDetector(
+                                        onTap: () {
+                                          setDialogState(() {
+                                            selectedPhotoUrl = url;
+                                          });
+                                        },
+                                        child: Container(
+                                          margin: const EdgeInsets.only(right: 6),
+                                          decoration: BoxDecoration(
+                                            shape: BoxShape.circle,
+                                            border: Border.all(
+                                              color: isSelected ? const Color(0xFF3B82F6) : Colors.transparent,
+                                              width: 2,
+                                            ),
+                                          ),
+                                          child: CircleAvatar(
+                                            radius: 16,
+                                            backgroundImage: NetworkImage(url),
+                                          ),
+                                        ),
+                                      );
+                                    }).toList(),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 16),
+
+                      _buildDialogField(_nameController, 'Nombre Completo', Icons.person),
+                      const SizedBox(height: 12),
+                      _buildDialogField(_emailController, 'Correo Electrónico', Icons.email, keyboardType: TextInputType.emailAddress),
+                      const SizedBox(height: 12),
+                      _buildDialogField(_passwordController, 'Contraseña', Icons.lock, obscure: true),
+                      const SizedBox(height: 12),
+                      _buildDialogField(_phoneController, 'Teléfono', Icons.phone, keyboardType: TextInputType.phone),
+                      const SizedBox(height: 16),
+
+                      // Selección de Vehículo (Lista desplegable/Dropdown)
+                      const Text(
+                        'Tipo de Vehículo',
+                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.black54),
+                      ),
+                      const SizedBox(height: 6),
+                      DropdownButtonFormField<String>(
+                        value: selectedVehicleType,
+                        dropdownColor: Colors.white,
+                        decoration: InputDecoration(
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                          prefixIcon: const Icon(Icons.commute, size: 18),
+                        ),
+                        style: const TextStyle(fontSize: 13, color: Colors.black87),
+                        items: const [
+                          DropdownMenuItem(value: 'Motocicleta', child: Text('Motocicleta')),
+                          DropdownMenuItem(value: 'Automóvil', child: Text('Automóvil')),
+                          DropdownMenuItem(value: 'Bicicleta', child: Text('Bicicleta')),
+                          DropdownMenuItem(value: 'Camioneta', child: Text('Camioneta')),
+                          DropdownMenuItem(value: 'A pie', child: Text('A pie')),
+                        ],
+                        onChanged: (val) {
+                          if (val != null) {
+                            setDialogState(() {
+                              selectedVehicleType = val;
+                            });
+                          }
+                        },
+                      ),
+                      const SizedBox(height: 12),
+                      _buildDialogField(_vehicleController, 'Modelo del Vehículo (ej. Cargo 150)', Icons.motorcycle),
+                      const SizedBox(height: 12),
+                      _buildDialogField(_plateController, 'Placa (ej. FHJ-429)', Icons.credit_card),
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: _isCreatingDriver ? null : () => Navigator.pop(context),
+                  child: const Text('Cancelar', style: TextStyle(color: Colors.black54)),
+                ),
+                ElevatedButton(
+                  onPressed: _isCreatingDriver
+                      ? null
+                      : () async {
+                          if (_formKey.currentState!.validate()) {
+                            setDialogState(() => _isCreatingDriver = true);
+                            try {
+                              final authService = Provider.of<AuthService>(context, listen: false);
+                              // Guardamos el tipo de vehículo junto con la descripción
+                              final fullVehicleDescription = '$selectedVehicleType - ${_vehicleController.text.trim()}';
+                              
+                              await authService.createDriver(
+                                name: _nameController.text.trim(),
+                                email: _emailController.text.trim(),
+                                password: _passwordController.text,
+                                phone: _phoneController.text.trim(),
+                                vehicle: fullVehicleDescription,
+                                plate: _plateController.text.trim(),
+                                photoUrl: selectedPhotoUrl,
+                              );
+
+                              if (mounted) {
+                                Navigator.pop(context);
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('Repartidor registrado con éxito'),
+                                    backgroundColor: Colors.green,
+                                  ),
+                                );
+                              }
+                            } on FirebaseAuthException catch (e) {
+                              final authService = Provider.of<AuthService>(context, listen: false);
+                              setDialogState(() {
+                                _errorMessage = authService.getErrorMessage(e);
+                              });
+                            } catch (e) {
+                              setDialogState(() {
+                                _errorMessage = 'Error: $e';
+                              });
+                            } finally {
+                              setDialogState(() => _isCreatingDriver = false);
+                            }
+                          }
+                        },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF3B82F6),
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
+                  child: _isCreatingDriver
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
+                        )
+                      : const Text('Registrar', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  // Diálogo para Editar un Repartidor Creado
+  void _showEditDriverDialog(Driver driver) {
+    _nameController.text = driver.name;
+    _phoneController.text = driver.phone;
+    _plateController.text = driver.plate;
+    
+    // Extraer tipo de vehículo y descripción
+    String selectedVehicleType = 'Motocicleta';
+    String vehicleDetail = driver.vehicle;
+    if (driver.vehicle.contains(' - ')) {
+      final parts = driver.vehicle.split(' - ');
+      selectedVehicleType = parts[0];
+      vehicleDetail = parts.sublist(1).join(' - ');
+    }
+    _vehicleController.text = vehicleDetail;
+    
+    String selectedPhotoUrl = driver.photoUrl;
+    bool isSaving = false;
+    setState(() => _errorMessage = null);
+
+    final listAvatars = [
+      'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=150',
+      'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&q=80&w=150',
+      'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?auto=format&fit=crop&q=80&w=150',
+      'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&q=80&w=150',
+    ];
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              backgroundColor: Colors.white,
+              surfaceTintColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              title: const Text(
+                'Editar Datos de Repartidor',
+                style: TextStyle(color: Colors.black87, fontWeight: FontWeight.bold, fontSize: 18),
+              ),
+              content: SingleChildScrollView(
+                child: Form(
+                  key: _formKey,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (_errorMessage != null)
+                        Container(
+                          margin: const EdgeInsets.only(bottom: 16),
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: Colors.red.withOpacity(0.1),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: Colors.redAccent.withOpacity(0.3)),
+                          ),
+                          child: Text(
+                            _errorMessage!,
+                            style: const TextStyle(color: Colors.redAccent, fontSize: 12),
+                          ),
+                        ),
+                      
+                      // Foto de Perfil
+                      const Text(
+                        'Foto de Perfil',
+                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.black54),
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          CircleAvatar(
+                            radius: 28,
+                            backgroundColor: Colors.grey.shade100,
+                            backgroundImage: selectedPhotoUrl.isNotEmpty ? NetworkImage(selectedPhotoUrl) : null,
+                            child: selectedPhotoUrl.isEmpty ? const Icon(Icons.person, color: Colors.grey, size: 28) : null,
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'Cambiar imagen:',
+                                  style: TextStyle(fontSize: 10, color: Colors.black45),
+                                ),
+                                const SizedBox(height: 4),
+                                SingleChildScrollView(
+                                  scrollDirection: Axis.horizontal,
+                                  child: Row(
+                                    children: listAvatars.map((url) {
+                                      final isSelected = selectedPhotoUrl == url;
+                                      return GestureDetector(
+                                        onTap: () {
+                                          setDialogState(() {
+                                            selectedPhotoUrl = url;
+                                          });
+                                        },
+                                        child: Container(
+                                          margin: const EdgeInsets.only(right: 6),
+                                          decoration: BoxDecoration(
+                                            shape: BoxShape.circle,
+                                            border: Border.all(
+                                              color: isSelected ? const Color(0xFF3B82F6) : Colors.transparent,
+                                              width: 2,
+                                            ),
+                                          ),
+                                          child: CircleAvatar(
+                                            radius: 16,
+                                            backgroundImage: NetworkImage(url),
+                                          ),
+                                        ),
+                                      );
+                                    }).toList(),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 16),
+
+                      _buildDialogField(_nameController, 'Nombre Completo', Icons.person),
+                      const SizedBox(height: 12),
+                      _buildDialogField(_phoneController, 'Teléfono', Icons.phone, keyboardType: TextInputType.phone),
+                      const SizedBox(height: 16),
+
+                      // Selección de Vehículo
+                      const Text(
+                        'Tipo de Vehículo',
+                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.black54),
+                      ),
+                      const SizedBox(height: 6),
+                      DropdownButtonFormField<String>(
+                        value: selectedVehicleType,
+                        dropdownColor: Colors.white,
+                        decoration: InputDecoration(
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                          prefixIcon: const Icon(Icons.commute, size: 18),
+                        ),
+                        style: const TextStyle(fontSize: 13, color: Colors.black87),
+                        items: const [
+                          DropdownMenuItem(value: 'Motocicleta', child: Text('Motocicleta')),
+                          DropdownMenuItem(value: 'Automóvil', child: Text('Automóvil')),
+                          DropdownMenuItem(value: 'Bicicleta', child: Text('Bicicleta')),
+                          DropdownMenuItem(value: 'Camioneta', child: Text('Camioneta')),
+                          DropdownMenuItem(value: 'A pie', child: Text('A pie')),
+                        ],
+                        onChanged: (val) {
+                          if (val != null) {
+                            setDialogState(() {
+                              selectedVehicleType = val;
+                            });
+                          }
+                        },
+                      ),
+                      const SizedBox(height: 12),
+                      _buildDialogField(_vehicleController, 'Modelo del Vehículo (ej. Cargo 150)', Icons.motorcycle),
+                      const SizedBox(height: 12),
+                      _buildDialogField(_plateController, 'Placa (ej. FHJ-429)', Icons.credit_card),
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: isSaving ? null : () => Navigator.pop(context),
+                  child: const Text('Cancelar', style: TextStyle(color: Colors.black54)),
+                ),
+                ElevatedButton(
+                  onPressed: isSaving
+                      ? null
+                      : () async {
+                          if (_formKey.currentState!.validate()) {
+                            setDialogState(() => isSaving = true);
+                            try {
+                              final authService = Provider.of<AuthService>(context, listen: false);
+                              final fullVehicleDescription = '$selectedVehicleType - ${_vehicleController.text.trim()}';
+                              
+                              await authService.updateDriverDetails(
+                                driver.uid,
+                                name: _nameController.text.trim(),
+                                phone: _phoneController.text.trim(),
+                                vehicle: fullVehicleDescription,
+                                plate: _plateController.text.trim(),
+                                photoUrl: selectedPhotoUrl,
+                              );
+
+                              if (mounted) {
+                                Navigator.pop(context);
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('Repartidor actualizado correctamente'),
+                                    backgroundColor: Colors.green,
+                                  ),
+                                );
+                              }
+                            } catch (e) {
+                              setDialogState(() {
+                                _errorMessage = 'Error: $e';
+                              });
+                            } finally {
+                              setDialogState(() => isSaving = false);
+                            }
+                          }
+                        },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF3B82F6),
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
+                  child: isSaving
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
+                        )
+                      : const Text('Guardar', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildDialogField(
+    TextEditingController controller,
+    String label,
+    IconData icon, {
+    bool obscure = false,
+    TextInputType keyboardType = TextInputType.text,
+  }) {
+    return TextFormField(
+      controller: controller,
+      obscureText: obscure,
+      keyboardType: keyboardType,
+      style: const TextStyle(color: Colors.black87, fontSize: 14),
+      validator: (val) => val == null || val.isEmpty ? 'Este campo es requerido' : null,
+      decoration: InputDecoration(
+        labelText: label,
+        labelStyle: const TextStyle(color: Colors.black54, fontSize: 13),
+        prefixIcon: Icon(icon, color: const Color(0xFF64748B), size: 18),
+        filled: true,
+        fillColor: const Color(0xFFF8FAFC),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(10),
+          borderSide: const BorderSide(color: Color(0xFFE2E8F0)),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(10),
+          borderSide: const BorderSide(color: Color(0xFFE2E8F0)),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(10),
+          borderSide: const BorderSide(color: Color(0xFF3B82F6), width: 1.5),
+        ),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      ),
+    );
+  }
+
+  Widget _buildDriversTab() {
+    final authService = Provider.of<AuthService>(context, listen: false);
+    return StreamBuilder<List<Driver>>(
+      stream: authService.getDriversStream(),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        final drivers = snapshot.data ?? [];
+        if (drivers.isEmpty) {
+          return Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.people_outline, size: 64, color: Color(0xFF94A3B8)),
+                const SizedBox(height: 16),
+                const Text(
+                  'No hay repartidores registrados',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.black54),
+                ),
+                const SizedBox(height: 16),
+                ElevatedButton.icon(
+                  onPressed: _showAddDriverDialog,
+                  icon: const Icon(Icons.add, size: 16),
+                  label: const Text('Agregar Repartidor'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF3B82F6),
+                    foregroundColor: Colors.white,
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
+                ),
+              ],
+            ),
+          );
+        }
+
+        return ListView.builder(
+          padding: const EdgeInsets.all(16),
+          itemCount: drivers.length,
+          itemBuilder: (context, index) {
+            final driver = drivers[index];
+            Color statusColor;
+            switch (driver.status) {
+              case 'available':
+                statusColor = Colors.green;
+                break;
+              case 'busy':
+                statusColor = Colors.orange;
+                break;
+              default:
+                statusColor = Colors.grey;
+            }
+
+            return Card(
+              color: Colors.white,
+              surfaceTintColor: Colors.white,
+              elevation: 0,
+              margin: const EdgeInsets.only(bottom: 12),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+                side: const BorderSide(color: Color(0xFFE2E8F0)),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  children: [
+                    CircleAvatar(
+                      backgroundColor: statusColor.withOpacity(0.1),
+                      backgroundImage: driver.photoUrl.isNotEmpty ? NetworkImage(driver.photoUrl) : null,
+                      child: driver.photoUrl.isEmpty ? Icon(Icons.electric_moped, color: statusColor, size: 20) : null,
+                    ),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            driver.name,
+                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Colors.black87),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(driver.email, style: const TextStyle(color: Colors.black54, fontSize: 12)),
+                          const SizedBox(height: 4),
+                          Text(
+                            'Vehículo: ${driver.vehicle} (${driver.plate})',
+                            style: const TextStyle(color: Colors.black54, fontSize: 12),
+                          ),
+                          const SizedBox(height: 2),
+                          Text('Tel: ${driver.phone}', style: const TextStyle(color: Colors.black45, fontSize: 12)),
+                        ],
+                      ),
+                    ),
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: statusColor.withOpacity(0.1),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.circle, size: 6, color: statusColor),
+                              const SizedBox(width: 6),
+                              Text(
+                                driver.statusLabel,
+                                style: TextStyle(color: statusColor, fontWeight: FontWeight.bold, fontSize: 10),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              icon: const Icon(Icons.edit_outlined, color: Colors.blueAccent, size: 20),
+                              onPressed: () => _showEditDriverDialog(driver),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.delete_outline, color: Colors.redAccent, size: 20),
+                              onPressed: () {
+                                showDialog(
+                                  context: context,
+                                  builder: (context) => AlertDialog(
+                                    title: const Text('Eliminar Repartidor'),
+                                    content: Text('¿Estás seguro de que deseas eliminar a ${driver.name}?'),
+                                    actions: [
+                                      TextButton(
+                                        onPressed: () => Navigator.pop(context),
+                                        child: const Text('Cancelar'),
+                                      ),
+                                      TextButton(
+                                        onPressed: () async {
+                                          Navigator.pop(context);
+                                          await authService.deleteDriver(driver.uid);
+                                          if (mounted) {
+                                            ScaffoldMessenger.of(context).showSnackBar(
+                                              const SnackBar(content: Text('Repartidor eliminado')),
+                                            );
+                                          }
+                                        },
+                                        child: const Text('Eliminar', style: TextStyle(color: Colors.redAccent)),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              },
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildOrdersTab() {
+    final firestoreService = Provider.of<FirestoreService>(context, listen: false);
+    final authService = Provider.of<AuthService>(context, listen: false);
+
+    return StreamBuilder<List<Order>>(
+      stream: firestoreService.getOrdersStream(),
+      builder: (context, ordersSnap) {
+        if (ordersSnap.connectionState == ConnectionState.waiting) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        final orders = ordersSnap.data ?? [];
+        if (orders.isEmpty) {
+          return const Center(
+            child: Text(
+              'No hay pedidos registrados en el sistema.',
+              style: TextStyle(color: Colors.black54),
+            ),
+          );
+        }
+
+        return StreamBuilder<List<Driver>>(
+          stream: authService.getDriversStream(),
+          builder: (context, driversSnap) {
+            final drivers = driversSnap.data ?? [];
+            return ListView.builder(
+              padding: const EdgeInsets.all(16),
+              itemCount: orders.length,
+              itemBuilder: (context, index) {
+                final order = orders[index];
+                final isAssigned = order.driverId.isNotEmpty;
+
+                return Card(
+                  color: Colors.white,
+                  surfaceTintColor: Colors.white,
+                  elevation: 0,
+                  margin: const EdgeInsets.only(bottom: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    side: const BorderSide(color: Color(0xFFE2E8F0)),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              order.brand,
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13,
+                                color: _getBrandColorStatic(order.brand),
+                              ),
+                            ),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: order.status == 'delivered'
+                                    ? Colors.green.withOpacity(0.1)
+                                    : (order.status == 'pending' ? Colors.blue.withOpacity(0.1) : Colors.orange.withOpacity(0.1)),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Text(
+                                order.status == 'pending' ? 'PENDIENTE' : order.status.toUpperCase(),
+                                style: TextStyle(
+                                  color: order.status == 'delivered'
+                                      ? Colors.green
+                                      : (order.status == 'pending' ? Colors.blue : Colors.orange),
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 9,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'Pedido: #${order.id.split('-').last.toUpperCase()}',
+                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: Colors.black87),
+                        ),
+                        const SizedBox(height: 6),
+                        Text('Producto: ${order.item}', style: const TextStyle(fontSize: 12, color: Colors.black54)),
+                        Text('Cliente: ${order.client}', style: const TextStyle(fontSize: 12, color: Colors.black54)),
+                        const SizedBox(height: 12),
+                        const Divider(height: 1, color: Color(0xFFF1F5F9)),
+                        const SizedBox(height: 12),
+                        if (isAssigned) ...[
+                          Row(
+                            children: [
+                              const Icon(Icons.electric_moped, size: 16, color: Colors.blueGrey),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  'Asignado a: ${order.driverName} (${order.driverVehicle})',
+                                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: Colors.blueGrey),
+                                ),
+                              ),
+                            ],
+                          ),
+                          if (order.status != 'delivered' && order.status != 'pending') ...[
+                            const SizedBox(height: 8),
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(4),
+                              child: LinearProgressIndicator(
+                                value: order.progress / 100.0,
+                                backgroundColor: Color(0xFFF1F5F9),
+                                valueColor: AlwaysStoppedAnimation<Color>(_getBrandColorStatic(order.brand)),
+                                minHeight: 4,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              'Progreso: ${order.progress.toStringAsFixed(0)}% | ETA: ${order.eta} min',
+                              style: const TextStyle(fontSize: 10, color: Colors.black38),
+                            ),
+                          ],
+                        ] else ...[
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              const Text(
+                                'Sin repartidor asignado',
+                                style: TextStyle(fontSize: 12, color: Colors.redAccent, fontWeight: FontWeight.w500),
+                              ),
+                              if (drivers.isNotEmpty)
+                                ElevatedButton(
+                                  onPressed: () {
+                                    _showAssignDriverDialog(order, drivers, firestoreService);
+                                  },
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: const Color(0xFF3B82F6),
+                                    foregroundColor: Colors.white,
+                                    elevation: 0,
+                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+                                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                                  ),
+                                  child: const Text('Asignar Repartidor', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+                                )
+                              else
+                                const Text(
+                                  '(Registra repartidores primero)',
+                                  style: TextStyle(fontSize: 11, color: Colors.black38),
+                                ),
+                            ],
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                );
+              },
+            );
+          },
+        );
+      },
+    );
+  }
+
+  void _showAssignDriverDialog(Order order, List<Driver> drivers, FirestoreService service) {
+    Driver? selectedDriver = drivers.firstWhere((d) => d.status == 'available', orElse: () => drivers.first);
+    
+    showDialog(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              backgroundColor: Colors.white,
+              surfaceTintColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              title: const Text(
+                'Asignar Repartidor',
+                style: TextStyle(color: Colors.black87, fontWeight: FontWeight.bold, fontSize: 16),
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Selecciona un repartidor para la orden #${order.id.split('-').last.toUpperCase()}:',
+                    style: const TextStyle(fontSize: 13, color: Colors.black54),
+                  ),
+                  const SizedBox(height: 16),
+                  DropdownButtonFormField<Driver>(
+                    value: selectedDriver,
+                    dropdownColor: Colors.white,
+                    decoration: InputDecoration(
+                      filled: true,
+                      fillColor: const Color(0xFFF8FAFC),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(10),
+                        borderSide: const BorderSide(color: Color(0xFFE2E8F0)),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(10),
+                        borderSide: const BorderSide(color: Color(0xFFE2E8F0)),
+                      ),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    ),
+                    items: drivers.map((driver) {
+                      Color statusColor;
+                      switch (driver.status) {
+                        case 'available':
+                          statusColor = Colors.green;
+                          break;
+                        case 'busy':
+                          statusColor = Colors.orange;
+                          break;
+                        default:
+                          statusColor = Colors.grey;
+                      }
+                      return DropdownMenuItem<Driver>(
+                        value: driver,
+                        child: Row(
+                          children: [
+                            Icon(Icons.circle, size: 8, color: statusColor),
+                            const SizedBox(width: 8),
+                            Text(
+                              '${driver.name} (${driver.vehicle})',
+                              style: const TextStyle(fontSize: 13, color: Colors.black87),
+                            ),
+                          ],
+                        ),
+                      );
+                    }).toList(),
+                    onChanged: (val) {
+                      if (val != null) {
+                        setDialogState(() => selectedDriver = val);
+                      }
+                    },
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Cancelar', style: TextStyle(color: Colors.black54)),
+                ),
+                ElevatedButton(
+                  onPressed: () async {
+                    if (selectedDriver != null) {
+                      Navigator.pop(context);
+                      await service.assignDriverToOrder(
+                        order.id,
+                        driverId: selectedDriver!.uid,
+                        driverName: selectedDriver!.name,
+                        driverVehicle: '${selectedDriver!.vehicle} (${selectedDriver!.plate})',
+                      );
+                      
+                      final authService = Provider.of<AuthService>(context, listen: false);
+                      await authService.updateDriverStatus(selectedDriver!.uid, 'busy');
+
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text('Orden asignada a ${selectedDriver!.name}'),
+                            backgroundColor: Colors.green,
+                          ),
+                        );
+                      }
+                    }
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF3B82F6),
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
+                  child: const Text('Confirmar', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final authService = Provider.of<AuthService>(context, listen: false);
+
+    return Scaffold(
+      backgroundColor: const Color(0xFFF8FAFC),
+      appBar: AppBar(
+        backgroundColor: Colors.white,
+        elevation: 0,
+        scrolledUnderElevation: 0,
+        title: const Text(
+          'Panel de Administración',
+          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: Colors.black87),
+        ),
+        bottom: TabBar(
+          controller: _tabController,
+          labelColor: const Color(0xFF3B82F6),
+          unselectedLabelColor: Colors.black38,
+          indicatorColor: const Color(0xFF3B82F6),
+          indicatorSize: TabBarIndicatorSize.tab,
+          tabs: const [
+            Tab(icon: Icon(Icons.people_outline, size: 20), text: 'Repartidores'),
+            Tab(icon: Icon(Icons.receipt_long_outlined, size: 20), text: 'Pedidos'),
+          ],
+        ),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh, color: Colors.black54, size: 20),
+            tooltip: 'Re-sembrar pedidos',
+            onPressed: () async {
+              final firestoreService = Provider.of<FirestoreService>(context, listen: false);
+              await firestoreService.seedInitialOrders();
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Pedidos re-sembrados exitosamente')),
+                );
+              }
+            },
+          ),
+          IconButton(
+            icon: const Icon(Icons.logout, color: Colors.redAccent, size: 20),
+            tooltip: 'Cerrar Sesión',
+            onPressed: () => authService.signOut(),
+          ),
+        ],
+      ),
+      body: TabBarView(
+        controller: _tabController,
+        children: [
+          _buildDriversTab(),
+          _buildOrdersTab(),
+        ],
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: _showAddDriverDialog,
+        backgroundColor: const Color(0xFF3B82F6),
+        foregroundColor: Colors.white,
+        elevation: 2,
+        child: const Icon(Icons.add),
+      ),
+    );
+  }
+}
+
+// ----------------------------------------------------------------------------
+// WIDGET GLOBAL DE NOTIFICACIONES IN-APP EN TIEMPO REAL
+// ----------------------------------------------------------------------------
+class InAppNotificationOverlay extends StatefulWidget {
+  final Widget child;
+  final String userEmail;
+
+  const InAppNotificationOverlay({
+    super.key,
+    required this.child,
+    required this.userEmail,
+  });
+
+  @override
+  State<InAppNotificationOverlay> createState() => _InAppNotificationOverlayState();
+}
+
+class _InAppNotificationOverlayState extends State<InAppNotificationOverlay> {
+  StreamSubscription<List<Order>>? _ordersSubscription;
+  final Map<String, String> _previousOrderStatuses = {};
+  OverlayEntry? _currentOverlay;
+  Timer? _dismissTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _startListeningToOrders();
+  }
+
+  @override
+  void dispose() {
+    _ordersSubscription?.cancel();
+    _dismissTimer?.cancel();
+    _removeCurrentNotification();
+    super.dispose();
+  }
+
+  void _startListeningToOrders() {
+    final firestoreService = Provider.of<FirestoreService>(context, listen: false);
+    _ordersSubscription = firestoreService.getOrdersStream().listen((orders) {
+      for (final order in orders) {
+        // Solo procesar si el usuario actual es cliente del pedido
+        // o si es el repartidor asignado a ese pedido.
+        final bool isMyOrder = order.client.toLowerCase().contains(widget.userEmail.split('@').first.toLowerCase()) || 
+                              order.driverId.isNotEmpty; // Escuchar si es del repartidor
+
+        if (isMyOrder) {
+          final String? prevStatus = _previousOrderStatuses[order.id];
+          if (prevStatus != null && prevStatus != order.status) {
+            // El estado cambió! Disparar notificación
+            _showNotification(order);
+          }
+          // Guardar estado actual
+          _previousOrderStatuses[order.id] = order.status;
+        }
+      }
+    });
+  }
+
+  void _removeCurrentNotification() {
+    if (_currentOverlay != null) {
+      _currentOverlay!.remove();
+      _currentOverlay = null;
+    }
+  }
+
+  void _showNotification(Order order) {
+    _dismissTimer?.cancel();
+    _removeCurrentNotification();
+
+    String title = '';
+    String description = '';
+    IconData icon = Icons.notifications;
+    Color color = Colors.blue;
+
+    switch (order.status) {
+      case 'accepted':
+        title = '¡Pedido Aceptado!';
+        description = '${order.driverName} aceptó entregar tu paquete de ${order.brand}.';
+        icon = Icons.assignment_turned_in_rounded;
+        color = Colors.indigo;
+        break;
+      case 'in_transit':
+        title = 'Paquete en Camino 🏍️';
+        description = 'Tu paquete de ${order.item} ya va en camino a tu ubicación.';
+        icon = Icons.motorcycle_rounded;
+        color = const Color(0xFF2563EB);
+        break;
+      case 'arrived':
+        title = '¡El repartidor ha llegado! 📍';
+        description = 'Sal a recibir a ${order.driverName}. Ten listo tu código: ${order.passcode}';
+        icon = Icons.pin_drop_rounded;
+        color = Colors.amber.shade800;
+        break;
+      case 'delivered':
+        title = '¡Entrega Exitosa! 🎉';
+        description = 'Tu paquete de ${order.brand} ha sido entregado correctamente.';
+        icon = Icons.done_all_rounded;
+        color = Colors.green;
+        break;
+    }
+
+    _currentOverlay = OverlayEntry(
+      builder: (context) {
+        return Positioned(
+          top: 24,
+          left: 16,
+          right: 16,
+          child: Material(
+            color: Colors.transparent,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(16),
+                boxShadow: const [
+                  BoxShadow(color: Colors.black26, blurRadius: 16, offset: Offset(0, 4)),
+                ],
+                border: Border.all(color: color.withOpacity(0.2), width: 1.5),
+              ),
+              child: Row(
+                children: [
+                  CircleAvatar(
+                    backgroundColor: color.withOpacity(0.1),
+                    child: Icon(icon, color: color, size: 22),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          title,
+                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.black87),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          description,
+                          style: const TextStyle(fontSize: 10, color: Colors.black54),
+                        ),
+                      ],
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close, size: 16, color: Colors.grey),
+                    onPressed: _removeCurrentNotification,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+
+    Overlay.of(context).insert(_currentOverlay!);
+
+    // Descartar automáticamente después de 5 segundos
+    _dismissTimer = Timer(const Duration(seconds: 5), () {
+      _removeCurrentNotification();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return widget.child;
   }
 }
