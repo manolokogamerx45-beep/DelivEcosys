@@ -4341,158 +4341,170 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> with SingleTickerPr
           return const Center(child: CircularProgressIndicator());
         }
         final drivers = snapshot.data ?? [];
-        if (drivers.isEmpty) {
-          return Center(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                const Icon(Icons.people_outline, size: 64, color: Color(0xFF94A3B8)),
-                const SizedBox(height: 16),
-                const Text(
-                  'No hay repartidores registrados',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.black54),
+        
+        return Column(
+          children: [
+            // Botón de registro intuitivo superior
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+              child: ElevatedButton.icon(
+                onPressed: _showAddDriverDialog,
+                icon: const Icon(Icons.person_add_rounded, color: Colors.white, size: 20),
+                label: const Text(
+                  'REGISTRAR NUEVO REPARTIDOR',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, letterSpacing: 0.5, color: Colors.white),
                 ),
-                const SizedBox(height: 16),
-                ElevatedButton.icon(
-                  onPressed: _showAddDriverDialog,
-                  icon: const Icon(Icons.add, size: 16),
-                  label: const Text('Agregar Repartidor'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF3B82F6),
-                    foregroundColor: Colors.white,
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                  ),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF10B981),
+                  elevation: 0,
+                  minimumSize: const Size(double.infinity, 50),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                 ),
-              ],
-            ),
-          );
-        }
-
-        return ListView.builder(
-          padding: const EdgeInsets.all(16),
-          itemCount: drivers.length,
-          itemBuilder: (context, index) {
-            final driver = drivers[index];
-            Color statusColor;
-            switch (driver.status) {
-              case 'available':
-                statusColor = Colors.green;
-                break;
-              case 'busy':
-                statusColor = Colors.orange;
-                break;
-              default:
-                statusColor = Colors.grey;
-            }
-
-            return Card(
-              color: Colors.white,
-              surfaceTintColor: Colors.white,
-              elevation: 0,
-              margin: const EdgeInsets.only(bottom: 12),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
-                side: const BorderSide(color: Color(0xFFE2E8F0)),
               ),
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Row(
-                  children: [
-                    CircleAvatar(
-                      backgroundColor: statusColor.withOpacity(0.1),
-                      backgroundImage: driver.photoUrl.isNotEmpty ? NetworkImage(driver.photoUrl) : null,
-                      child: driver.photoUrl.isEmpty ? Icon(Icons.electric_moped, color: statusColor, size: 20) : null,
-                    ),
-                    const SizedBox(width: 16),
-                    Expanded(
+            ),
+            
+            Expanded(
+              child: drivers.isEmpty
+                  ? Center(
                       child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: const [
+                          Icon(Icons.people_outline, size: 64, color: Color(0xFF94A3B8)),
+                          SizedBox(height: 16),
                           Text(
-                            driver.name,
-                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Colors.black87),
+                            'No hay repartidores registrados',
+                            style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.black54),
                           ),
-                          const SizedBox(height: 4),
-                          Text(driver.email, style: const TextStyle(color: Colors.black54, fontSize: 12)),
-                          const SizedBox(height: 4),
-                          Text(
-                            'Vehículo: ${driver.vehicle} (${driver.plate})',
-                            style: const TextStyle(color: Colors.black54, fontSize: 12),
-                          ),
-                          const SizedBox(height: 2),
-                          Text('Tel: ${driver.phone}', style: const TextStyle(color: Colors.black45, fontSize: 12)),
                         ],
                       ),
-                    ),
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.end,
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                          decoration: BoxDecoration(
-                            color: statusColor.withOpacity(0.1),
-                            borderRadius: BorderRadius.circular(8),
+                    )
+                  : ListView.builder(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                      itemCount: drivers.length,
+                      itemBuilder: (context, index) {
+                        final driver = drivers[index];
+                        Color statusColor;
+                        switch (driver.status) {
+                          case 'available':
+                            statusColor = Colors.green;
+                            break;
+                          case 'busy':
+                            statusColor = Colors.orange;
+                            break;
+                          default:
+                            statusColor = Colors.grey;
+                        }
+
+                        return Card(
+                          color: Colors.white,
+                          surfaceTintColor: Colors.white,
+                          elevation: 0,
+                          margin: const EdgeInsets.only(bottom: 12),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            side: const BorderSide(color: Color(0xFFE2E8F0)),
                           ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(Icons.circle, size: 6, color: statusColor),
-                              const SizedBox(width: 6),
-                              Text(
-                                driver.statusLabel,
-                                style: TextStyle(color: statusColor, fontWeight: FontWeight.bold, fontSize: 10),
-                              ),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            IconButton(
-                              icon: const Icon(Icons.edit_outlined, color: Colors.blueAccent, size: 20),
-                              onPressed: () => _showEditDriverDialog(driver),
-                            ),
-                            IconButton(
-                              icon: const Icon(Icons.delete_outline, color: Colors.redAccent, size: 20),
-                              onPressed: () {
-                                showDialog(
-                                  context: context,
-                                  builder: (context) => AlertDialog(
-                                    title: const Text('Eliminar Repartidor'),
-                                    content: Text('¿Estás seguro de que deseas eliminar a ${driver.name}?'),
-                                    actions: [
-                                      TextButton(
-                                        onPressed: () => Navigator.pop(context),
-                                        child: const Text('Cancelar'),
+                          child: Padding(
+                            padding: const EdgeInsets.all(16),
+                            child: Row(
+                              children: [
+                                CircleAvatar(
+                                  backgroundColor: statusColor.withOpacity(0.1),
+                                  backgroundImage: driver.photoUrl.isNotEmpty ? NetworkImage(driver.photoUrl) : null,
+                                  child: driver.photoUrl.isEmpty ? Icon(Icons.electric_moped, color: statusColor, size: 20) : null,
+                                ),
+                                const SizedBox(width: 16),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        driver.name,
+                                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Colors.black87),
                                       ),
-                                      TextButton(
-                                        onPressed: () async {
-                                          Navigator.pop(context);
-                                          await authService.deleteDriver(driver.uid);
-                                          if (mounted) {
-                                            ScaffoldMessenger.of(context).showSnackBar(
-                                              const SnackBar(content: Text('Repartidor eliminado')),
-                                            );
-                                          }
-                                        },
-                                        child: const Text('Eliminar', style: TextStyle(color: Colors.redAccent)),
+                                      const SizedBox(height: 4),
+                                      Text(driver.email, style: const TextStyle(color: Colors.black54, fontSize: 12)),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        'Vehículo: ${driver.vehicle} (${driver.plate})',
+                                        style: const TextStyle(color: Colors.black54, fontSize: 12),
                                       ),
+                                      const SizedBox(height: 2),
+                                      Text('Tel: ${driver.phone}', style: const TextStyle(color: Colors.black45, fontSize: 12)),
                                     ],
                                   ),
-                                );
-                              },
+                                ),
+                                Column(
+                                  crossAxisAlignment: CrossAxisAlignment.end,
+                                  children: [
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                      decoration: BoxDecoration(
+                                        color: statusColor.withOpacity(0.1),
+                                        borderRadius: BorderRadius.circular(8),
+                                      ),
+                                      child: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Icon(Icons.circle, size: 6, color: statusColor),
+                                          const SizedBox(width: 6),
+                                          Text(
+                                            driver.statusLabel,
+                                            style: TextStyle(color: statusColor, fontWeight: FontWeight.bold, fontSize: 10),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                    const SizedBox(height: 8),
+                                    Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        IconButton(
+                                          icon: const Icon(Icons.edit_outlined, color: Colors.blueAccent, size: 20),
+                                          onPressed: () => _showEditDriverDialog(driver),
+                                        ),
+                                        IconButton(
+                                          icon: const Icon(Icons.delete_outline, color: Colors.redAccent, size: 20),
+                                          onPressed: () {
+                                            showDialog(
+                                              context: context,
+                                              builder: (context) => AlertDialog(
+                                                title: const Text('Eliminar Repartidor'),
+                                                content: Text('¿Estás seguro de que deseas eliminar a ${driver.name}?'),
+                                                actions: [
+                                                  TextButton(
+                                                    onPressed: () => Navigator.pop(context),
+                                                    child: const Text('Cancelar'),
+                                                  ),
+                                                  TextButton(
+                                                    onPressed: () async {
+                                                      Navigator.pop(context);
+                                                      await authService.deleteDriver(driver.uid);
+                                                      if (mounted) {
+                                                        ScaffoldMessenger.of(context).showSnackBar(
+                                                          const SnackBar(content: Text('Repartidor eliminado')),
+                                                        );
+                                                      }
+                                                    },
+                                                    child: const Text('Eliminar', style: TextStyle(color: Colors.redAccent)),
+                                                  ),
+                                                ],
+                                              ),
+                                            );
+                                          },
+                                        ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
+                              ],
                             ),
-                          ],
-                        ),
-                      ],
+                          ),
+                        );
+                      },
                     ),
-                  ],
-                ),
-              ),
-            );
-          },
+            ),
+          ],
         );
       },
     );
@@ -4509,187 +4521,212 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> with SingleTickerPr
           return const Center(child: CircularProgressIndicator());
         }
         final orders = ordersSnap.data ?? [];
-        if (orders.isEmpty) {
-          return const Center(
-            child: Text(
-              'No hay pedidos registrados en el sistema.',
-              style: TextStyle(color: Colors.black54),
-            ),
-          );
-        }
 
         return StreamBuilder<List<Driver>>(
           stream: authService.getDriversStream(),
           builder: (context, driversSnap) {
             final drivers = driversSnap.data ?? [];
-            return ListView.builder(
-              padding: const EdgeInsets.all(16),
-              itemCount: orders.length,
-              itemBuilder: (context, index) {
-                final order = orders[index];
-                final isAssigned = order.driverId.isNotEmpty;
 
-                return Card(
-                  color: Colors.white,
-                  surfaceTintColor: Colors.white,
-                  elevation: 0,
-                  margin: const EdgeInsets.only(bottom: 12),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    side: const BorderSide(color: Color(0xFFE2E8F0)),
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Text(
-                              order.brand,
-                              style: TextStyle(
-                                fontWeight: FontWeight.bold,
-                                fontSize: 13,
-                                color: _getBrandColorStatic(order.brand),
-                              ),
-                            ),
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                              decoration: BoxDecoration(
-                                color: order.status == 'delivered'
-                                    ? Colors.green.withOpacity(0.1)
-                                    : (order.status == 'pending' ? Colors.blue.withOpacity(0.1) : Colors.orange.withOpacity(0.1)),
-                                borderRadius: BorderRadius.circular(6),
-                              ),
-                              child: Text(
-                                order.status == 'pending' ? 'PENDIENTE' : order.status.toUpperCase(),
-                                style: TextStyle(
-                                  color: order.status == 'delivered'
-                                      ? Colors.green
-                                      : (order.status == 'pending' ? Colors.blue : Colors.orange),
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 9,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Text(
-                              'Pedido: #${order.id.split('-').last.toUpperCase()}',
-                              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: Colors.black87),
-                            ),
-                            IconButton(
-                              icon: const Icon(Icons.delete_outline_rounded, color: Colors.redAccent, size: 20),
-                              tooltip: 'Eliminar Pedido',
-                              onPressed: () {
-                                showDialog(
-                                  context: context,
-                                  builder: (ctx) => AlertDialog(
-                                    title: const Text('Eliminar Pedido', style: TextStyle(fontWeight: FontWeight.bold)),
-                                    content: Text('¿Estás seguro de que deseas eliminar permanentemente el pedido #${order.id.split('-').last.toUpperCase()}?'),
-                                    actions: [
-                                      TextButton(
-                                        onPressed: () => Navigator.pop(ctx),
-                                        child: const Text('Cancelar', style: TextStyle(color: Colors.black54)),
-                                      ),
-                                      ElevatedButton(
-                                        onPressed: () async {
-                                          Navigator.pop(ctx);
-                                          await firestoreService.deleteOrder(order.id);
-                                          if (context.mounted) {
-                                            ScaffoldMessenger.of(context).showSnackBar(
-                                              const SnackBar(
-                                                content: Text('Pedido eliminado permanentemente.'),
-                                                backgroundColor: Colors.redAccent,
-                                              ),
-                                            );
-                                          }
-                                        },
-                                        style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
-                                        child: const Text('Eliminar', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                                      ),
-                                    ],
-                                  ),
-                                );
-                              },
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 6),
-                        Text('Producto: ${order.item}', style: const TextStyle(fontSize: 12, color: Colors.black54)),
-                        Text('Cliente: ${order.client}', style: const TextStyle(fontSize: 12, color: Colors.black54)),
-                        const SizedBox(height: 12),
-                        const Divider(height: 1, color: Color(0xFFF1F5F9)),
-                        const SizedBox(height: 12),
-                        if (isAssigned) ...[
-                          Row(
-                            children: [
-                              const Icon(Icons.electric_moped, size: 16, color: Colors.blueGrey),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: Text(
-                                  'Asignado a: ${order.driverName} (${order.driverVehicle})',
-                                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: Colors.blueGrey),
-                                ),
-                              ),
-                            ],
-                          ),
-                          if (order.status != 'delivered' && order.status != 'pending') ...[
-                            const SizedBox(height: 8),
-                            ClipRRect(
-                              borderRadius: BorderRadius.circular(4),
-                              child: LinearProgressIndicator(
-                                value: order.progress / 100.0,
-                                backgroundColor: Color(0xFFF1F5F9),
-                                valueColor: AlwaysStoppedAnimation<Color>(_getBrandColorStatic(order.brand)),
-                                minHeight: 4,
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              'Progreso: ${order.progress.toStringAsFixed(0)}% | ETA: ${order.eta} min',
-                              style: const TextStyle(fontSize: 10, color: Colors.black38),
-                            ),
-                          ],
-                        ] else ...[
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              const Text(
-                                'Sin repartidor asignado',
-                                style: TextStyle(fontSize: 12, color: Colors.redAccent, fontWeight: FontWeight.w500),
-                              ),
-                              if (drivers.isNotEmpty)
-                                ElevatedButton(
-                                  onPressed: () {
-                                    _showAssignDriverDialog(order, drivers, firestoreService);
-                                  },
-                                  style: ElevatedButton.styleFrom(
-                                    backgroundColor: const Color(0xFF3B82F6),
-                                    foregroundColor: Colors.white,
-                                    elevation: 0,
-                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
-                                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                                  ),
-                                  child: const Text('Asignar Repartidor', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
-                                )
-                              else
-                                const Text(
-                                  '(Registra repartidores primero)',
-                                  style: TextStyle(fontSize: 11, color: Colors.black38),
-                                ),
-                            ],
-                          ),
-                        ],
-                      ],
+            return Column(
+              children: [
+                // Botón de registro de paquete intuitivo superior
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                  child: ElevatedButton.icon(
+                    onPressed: _showCreateOrderDialog,
+                    icon: const Icon(Icons.inventory_2_rounded, color: Colors.white, size: 20),
+                    label: const Text(
+                      'REGISTRAR NUEVO PAQUETE',
+                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, letterSpacing: 0.5, color: Colors.white),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF3B82F6),
+                      elevation: 0,
+                      minimumSize: const Size(double.infinity, 50),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                     ),
                   ),
-                );
-              },
+                ),
+
+                Expanded(
+                  child: orders.isEmpty
+                      ? const Center(
+                          child: Text(
+                            'No hay pedidos registrados en el sistema.',
+                            style: TextStyle(color: Colors.black54),
+                          ),
+                        )
+                      : ListView.builder(
+                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                          itemCount: orders.length,
+                          itemBuilder: (context, index) {
+                            final order = orders[index];
+                            final isAssigned = order.driverId.isNotEmpty;
+
+                            return Card(
+                              color: Colors.white,
+                              surfaceTintColor: Colors.white,
+                              elevation: 0,
+                              margin: const EdgeInsets.only(bottom: 12),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                side: const BorderSide(color: Color(0xFFE2E8F0)),
+                              ),
+                              child: Padding(
+                                padding: const EdgeInsets.all(16),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        Text(
+                                          order.brand,
+                                          style: TextStyle(
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 13,
+                                            color: _getBrandColorStatic(order.brand),
+                                          ),
+                                        ),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                          decoration: BoxDecoration(
+                                            color: order.status == 'delivered'
+                                                ? Colors.green.withOpacity(0.1)
+                                                : (order.status == 'pending' ? Colors.blue.withOpacity(0.1) : Colors.orange.withOpacity(0.1)),
+                                            borderRadius: BorderRadius.circular(6),
+                                          ),
+                                          child: Text(
+                                            order.status == 'pending' ? 'PENDIENTE' : order.status.toUpperCase(),
+                                            style: TextStyle(
+                                              color: order.status == 'delivered'
+                                                  ? Colors.green
+                                                  : (order.status == 'pending' ? Colors.blue : Colors.orange),
+                                              fontWeight: FontWeight.bold,
+                                              fontSize: 9,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    Row(
+                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        Text(
+                                          'Pedido: #${order.id.split('-').last.toUpperCase()}',
+                                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: Colors.black87),
+                                        ),
+                                        IconButton(
+                                          icon: const Icon(Icons.delete_outline_rounded, color: Colors.redAccent, size: 20),
+                                          tooltip: 'Eliminar Pedido',
+                                          onPressed: () {
+                                            showDialog(
+                                              context: context,
+                                              builder: (ctx) => AlertDialog(
+                                                title: const Text('Eliminar Pedido', style: TextStyle(fontWeight: FontWeight.bold)),
+                                                content: Text('¿Estás seguro de que deseas eliminar permanentemente el pedido #${order.id.split('-').last.toUpperCase()}?'),
+                                                actions: [
+                                                  TextButton(
+                                                    onPressed: () => Navigator.pop(ctx),
+                                                    child: const Text('Cancelar', style: TextStyle(color: Colors.black54)),
+                                                  ),
+                                                  ElevatedButton(
+                                                    onPressed: () async {
+                                                      Navigator.pop(ctx);
+                                                      await firestoreService.deleteOrder(order.id);
+                                                      if (context.mounted) {
+                                                        ScaffoldMessenger.of(context).showSnackBar(
+                                                          const SnackBar(
+                                                            content: Text('Pedido eliminado permanentemente.'),
+                                                            backgroundColor: Colors.redAccent,
+                                                          ),
+                                                        );
+                                                      }
+                                                    },
+                                                    style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+                                                    child: const Text('Eliminar', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                                                  ),
+                                                ],
+                                              ),
+                                            );
+                                          },
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 6),
+                                    Text('Producto: ${order.item}', style: const TextStyle(fontSize: 12, color: Colors.black54)),
+                                    Text('Cliente: ${order.client}', style: const TextStyle(fontSize: 12, color: Colors.black54)),
+                                    const SizedBox(height: 12),
+                                    const Divider(height: 1, color: Color(0xFFF1F5F9)),
+                                    const SizedBox(height: 12),
+                                    if (isAssigned) ...[
+                                      Row(
+                                        children: [
+                                          const Icon(Icons.electric_moped, size: 16, color: Colors.blueGrey),
+                                          const SizedBox(width: 8),
+                                          Expanded(
+                                            child: Text(
+                                              'Asignado a: ${order.driverName} (${order.driverVehicle})',
+                                              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: Colors.blueGrey),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      if (order.status != 'delivered' && order.status != 'pending') ...[
+                                        const SizedBox(height: 8),
+                                        ClipRRect(
+                                          borderRadius: BorderRadius.circular(4),
+                                          child: LinearProgressIndicator(
+                                            value: order.progress / 100.0,
+                                            backgroundColor: Color(0xFFF1F5F9),
+                                            valueColor: AlwaysStoppedAnimation<Color>(_getBrandColorStatic(order.brand)),
+                                            minHeight: 4,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 4),
+                                        Text(
+                                          'Progreso: ${order.progress.toStringAsFixed(0)}% | ETA: ${order.eta} min',
+                                          style: const TextStyle(fontSize: 10, color: Colors.black38),
+                                        ),
+                                      ],
+                                    ] else ...[
+                                      Row(
+                                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                        children: [
+                                          const Text(
+                                            'Sin repartidor asignado',
+                                            style: TextStyle(fontSize: 12, color: Colors.redAccent, fontWeight: FontWeight.w500),
+                                          ),
+                                          if (drivers.isNotEmpty)
+                                            ElevatedButton(
+                                              onPressed: () {
+                                                _showAssignDriverDialog(order, drivers, firestoreService);
+                                              },
+                                              style: ElevatedButton.styleFrom(
+                                                backgroundColor: const Color(0xFF3B82F6),
+                                                foregroundColor: Colors.white,
+                                                elevation: 0,
+                                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+                                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                                              ),
+                                              child: const Text('Asignar Repartidor', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+                                            )
+                                          else
+                                            const Text(
+                                              '(Registra repartidores primero)',
+                                              style: TextStyle(fontSize: 11, color: Colors.black38),
+                                            ),
+                                        ],
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                ),
+              ],
             );
           },
         );
@@ -4828,23 +4865,14 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> with SingleTickerPr
     final trackingController = TextEditingController();
     final clientEmailController = TextEditingController();
     final addressController = TextEditingController(text: 'Calle Juárez #123, Centro');
-    final latController = TextEditingController(text: '20.3700');
-    final lngController = TextEditingController(text: '-100.0150');
 
     String selectedBrand = 'Amazon Prime';
-    String selectedDestinationPreset = 'Centro de Distribución';
     String? foundClientName;
     String? foundClientId;
     String? orderError;
     bool isSearching = false;
 
     final brands = ['Amazon Prime', 'MercadoLibre', 'DHL Express', 'FedEx', 'Estafeta', 'UPS', 'Otro'];
-    final destinationPresets = [
-      'Centro de Distribución',
-      'Oficina Satélite Norte',
-      'Plaza Principal',
-      'Coordenadas Manuales'
-    ];
 
     showDialog(
       context: context,
@@ -4852,8 +4880,6 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> with SingleTickerPr
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setDialogState) {
-            final isManual = selectedDestinationPreset == 'Coordenadas Manuales';
-
             return AlertDialog(
               backgroundColor: Colors.white,
               surfaceTintColor: Colors.white,
@@ -4999,89 +5025,6 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> with SingleTickerPr
                     ),
 
                     const SizedBox(height: 16),
-
-                    // ── Ubicación de entrega (Mapa Coordenadas) ──
-                    const Text('Punto de Entrega (Coordenadas)', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.black54)),
-                    const SizedBox(height: 6),
-                    DropdownButtonFormField<String>(
-                      value: selectedDestinationPreset,
-                      dropdownColor: Colors.white,
-                      decoration: InputDecoration(
-                        filled: true,
-                        fillColor: const Color(0xFFF1F5F9),
-                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-                      ),
-                      items: destinationPresets.map((p) => DropdownMenuItem(value: p, child: Text(p, style: const TextStyle(fontSize: 13)))).toList(),
-                      onChanged: (val) {
-                        if (val != null) {
-                          setDialogState(() {
-                            selectedDestinationPreset = val;
-                            if (val == 'Centro de Distribución') {
-                              latController.text = '20.3700';
-                              lngController.text = '-100.0150';
-                            } else if (val == 'Oficina Satélite Norte') {
-                              latController.text = '20.3850';
-                              lngController.text = '-100.0120';
-                            } else if (val == 'Plaza Principal') {
-                              latController.text = '20.3600';
-                              lngController.text = '-100.0300';
-                            }
-                          });
-                        }
-                      },
-                    ),
-
-                    if (isManual) ...[
-                      const SizedBox(height: 12),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Text('Latitud', style: TextStyle(fontSize: 11, color: Colors.black54)),
-                                const SizedBox(height: 4),
-                                TextField(
-                                  controller: latController,
-                                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                                  style: const TextStyle(fontSize: 13),
-                                  decoration: InputDecoration(
-                                    filled: true,
-                                    fillColor: const Color(0xFFF1F5F9),
-                                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
-                                    contentPadding: const EdgeInsets.all(10),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Text('Longitud', style: TextStyle(fontSize: 11, color: Colors.black54)),
-                                const SizedBox(height: 4),
-                                TextField(
-                                  controller: lngController,
-                                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                                  style: const TextStyle(fontSize: 13),
-                                  decoration: InputDecoration(
-                                    filled: true,
-                                    fillColor: const Color(0xFFF1F5F9),
-                                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
-                                    contentPadding: const EdgeInsets.all(10),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-
-                    const SizedBox(height: 16),
                     const Divider(),
                     const SizedBox(height: 8),
 
@@ -5208,8 +5151,9 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> with SingleTickerPr
                       return;
                     }
 
-                    final lat = double.tryParse(latController.text.trim()) ?? 20.3700;
-                    final lng = double.tryParse(lngController.text.trim()) ?? -100.0150;
+                    // Coordenadas fijas por defecto por ser más sencillas y transparentes
+                    const double lat = 20.3700;
+                    const double lng = -100.0150;
 
                     final firestoreService = Provider.of<FirestoreService>(context, listen: false);
                     await firestoreService.createOrder(
@@ -5286,23 +5230,6 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> with SingleTickerPr
           _buildDriversTab(),
           _buildOrdersTab(),
         ],
-      ),
-      floatingActionButton: AnimatedBuilder(
-        animation: _tabController,
-        builder: (context, _) {
-          final isOrdersTab = _tabController.index == 1;
-          return FloatingActionButton.extended(
-            onPressed: isOrdersTab ? _showCreateOrderDialog : _showAddDriverDialog,
-            backgroundColor: const Color(0xFF3B82F6),
-            foregroundColor: Colors.white,
-            elevation: 2,
-            icon: Icon(isOrdersTab ? Icons.inventory_2_rounded : Icons.person_add_rounded),
-            label: Text(
-              isOrdersTab ? 'Nuevo Paquete' : 'Nuevo Repartidor',
-              style: const TextStyle(fontWeight: FontWeight.bold),
-            ),
-          );
-        },
       ),
     );
   }
