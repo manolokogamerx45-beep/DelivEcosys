@@ -77,6 +77,37 @@ class AuthService {
   }
 
   // ---------------------------------------------------------------------------
+  // RECUPERAR CONTRASEÑA
+  // ---------------------------------------------------------------------------
+  Future<void> sendPasswordResetEmail(String email) async {
+    await _auth.sendPasswordResetEmail(email: email.trim());
+  }
+
+  // ---------------------------------------------------------------------------
+  // BUSCAR USUARIO POR CORREO (para vincular paquetes)
+  // ---------------------------------------------------------------------------
+  Future<AppUser?> findUserByEmail(String email) async {
+    final query = await _db
+        .collection('users')
+        .where('email', isEqualTo: email.trim().toLowerCase())
+        .limit(1)
+        .get();
+
+    if (query.docs.isEmpty) {
+      // Intentar sin toLowerCase por si el email se guardó con mayúsculas
+      final query2 = await _db
+          .collection('users')
+          .where('email', isEqualTo: email.trim())
+          .limit(1)
+          .get();
+      if (query2.docs.isEmpty) return null;
+      return AppUser.fromMap(query2.docs.first.id, query2.docs.first.data());
+    }
+
+    return AppUser.fromMap(query.docs.first.id, query.docs.first.data());
+  }
+
+  // ---------------------------------------------------------------------------
   // LOGOUT
   // ---------------------------------------------------------------------------
   Future<void> signOut() async {

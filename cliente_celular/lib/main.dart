@@ -16,10 +16,13 @@ import 'services/firestore_service.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'services/notification_service.dart';
 // ----------------------------------------------------------------------------
 // CONFIGURACIÓN DE MAPBOX Y ENRUTAMIENTO REAL (OSRM)
 // ----------------------------------------------------------------------------
-String mapboxAccessToken = 'YOUR_MAPBOX_ACCESS_TOKEN'; // El usuario puede pegar su token aquí
+String mapboxAccessToken = 'YOUR_MAPBOX_ACCESS_TOKEN';
 String mapboxStyleId = 'streets-v12'; // e.g. streets-v12, satellite-streets-v12, dark-v11, light-v11
 
 // Retorna la capa de mapas correspondiente (Mapbox si hay token, o OpenStreetMap de respaldo)
@@ -171,12 +174,38 @@ void showMapSettingsDialog(BuildContext context, VoidCallback onSaved) {
   );
 }
 
+// ----------------------------------------------------------------------------
+// CONFIGURACIÓN DE AJUSTES GLOBALES (Tema y Notificaciones)
+// ----------------------------------------------------------------------------
+class AppSettings extends ChangeNotifier {
+  ThemeMode _themeMode = ThemeMode.light;
+  bool _receiveNotifications = true;
+
+  ThemeMode get themeMode => _themeMode;
+  bool get receiveNotifications => _receiveNotifications;
+
+  void toggleTheme(bool isDark) {
+    _themeMode = isDark ? ThemeMode.dark : ThemeMode.light;
+    notifyListeners();
+  }
+
+  void setReceiveNotifications(bool value) {
+    _receiveNotifications = value;
+    notifyListeners();
+  }
+}
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   try {
     await Firebase.initializeApp(
       options: DefaultFirebaseOptions.currentPlatform,
     );
+    
+    // Inicializar el Servicio de Notificaciones Locales Reales
+    final notificationService = NotificationService();
+    await notificationService.init();
+    await notificationService.requestPermissions();
   } catch (e) {
     debugPrint("Firebase connection failed: $e");
   }
@@ -186,6 +215,7 @@ void main() async {
       providers: [
         Provider<FirestoreService>(create: (_) => FirestoreService()),
         Provider<AuthService>(create: (_) => AuthService()),
+        ChangeNotifierProvider<AppSettings>(create: (_) => AppSettings()),
       ],
       child: const UnifiedDelivApp(),
     ),
@@ -197,21 +227,41 @@ class UnifiedDelivApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'DelivEcosys - App Unificada',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        useMaterial3: true,
-        brightness: Brightness.light,
-        scaffoldBackgroundColor: const Color(0xFFF9FAFB),
-        fontFamily: 'Roboto',
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF3B82F6),
-          brightness: Brightness.light,
-          background: const Color(0xFFF9FAFB),
-        ),
-      ),
-      home: const AuthWrapper(),
+    return Consumer<AppSettings>(
+      builder: (context, settings, _) {
+        return MaterialApp(
+          title: 'DelivEcosys - App Unificada',
+          debugShowCheckedModeBanner: false,
+          themeMode: settings.themeMode,
+          theme: ThemeData(
+            useMaterial3: true,
+            brightness: Brightness.light,
+            scaffoldBackgroundColor: const Color(0xFFF9FAFB),
+            fontFamily: 'Roboto',
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: const Color(0xFF3B82F6),
+              brightness: Brightness.light,
+              background: const Color(0xFFF9FAFB),
+            ),
+          ),
+          darkTheme: ThemeData(
+            useMaterial3: true,
+            brightness: Brightness.dark,
+            scaffoldBackgroundColor: const Color(0xFF0F172A),
+            fontFamily: 'Roboto',
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: const Color(0xFF3B82F6),
+              brightness: Brightness.dark,
+              background: const Color(0xFF0F172A),
+            ),
+            cardTheme: const CardThemeData(
+              color: Color(0xFF1E293B),
+              surfaceTintColor: Colors.transparent,
+            ),
+          ),
+          home: const AuthWrapper(),
+        );
+      },
     );
   }
 }
@@ -256,12 +306,13 @@ class AuthWrapper extends StatelessWidget {
               return const LoginScreen();
             }
 
-            // Redirigir según rol
             if (appUser.isAdmin) {
               return AdminPanelScreen(appUser: appUser);
             } else if (appUser.isDriver) {
               return InAppNotificationOverlay(
                 userEmail: appUser.email,
+                userId: appUser.uid,
+                userRole: 'driver',
                 child: RiderDashboardScreen(
                   appUser: appUser,
                   onLogout: () => authService.signOut(),
@@ -270,8 +321,10 @@ class AuthWrapper extends StatelessWidget {
             } else {
               return InAppNotificationOverlay(
                 userEmail: appUser.email,
+                userId: appUser.uid,
+                userRole: 'client',
                 child: CustomerPhoneScreen(
-                  selectedOrderId: 'order-1',
+                  appUser: appUser,
                   onLogout: () => authService.signOut(),
                 ),
               );
@@ -363,6 +416,133 @@ class _LoginScreenState extends State<LoginScreen> {
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
+  }
+
+  Future<void> _handleForgotPassword() async {
+    final resetEmailController = TextEditingController(
+      text: _emailController.text.trim(),
+    );
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Colors.white,
+        surfaceTintColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: const Color(0xFF2563EB).withOpacity(0.1),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Icon(Icons.lock_reset_rounded, color: Color(0xFF2563EB), size: 22),
+            ),
+            const SizedBox(width: 12),
+            const Expanded(
+              child: Text(
+                'Recuperar Contraseña',
+                style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold, color: Color(0xFF0F172A)),
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Ingresa tu correo electrónico y te enviaremos un enlace para restablecer tu contraseña.',
+              style: TextStyle(fontSize: 13, color: Color(0xFF64748B)),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: resetEmailController,
+              keyboardType: TextInputType.emailAddress,
+              style: const TextStyle(color: Color(0xFF0F172A), fontSize: 14),
+              decoration: InputDecoration(
+                hintText: 'ejemplo@correo.com',
+                hintStyle: const TextStyle(color: Color(0xFF94A3B8)),
+                prefixIcon: const Icon(Icons.email_outlined, color: Color(0xFF94A3B8), size: 18),
+                filled: true,
+                fillColor: const Color(0xFFF1F5F9),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: Color(0xFFE2E8F0)),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: Color(0xFFE2E8F0)),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: Color(0xFF2563EB), width: 1.5),
+                ),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancelar', style: TextStyle(color: Color(0xFF64748B), fontWeight: FontWeight.w600)),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF2563EB),
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              elevation: 0,
+            ),
+            child: const Text('Enviar Enlace', style: TextStyle(fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      final email = resetEmailController.text.trim();
+      if (email.isEmpty) {
+        setState(() => _errorMessage = 'Ingresa un correo electrónico para recuperar tu contraseña.');
+        return;
+      }
+      try {
+        final authService = Provider.of<AuthService>(context, listen: false);
+        await authService.sendPasswordResetEmail(email);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Row(
+                children: [
+                  const Icon(Icons.check_circle_rounded, color: Colors.white, size: 18),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Se envió un enlace de recuperación a $email',
+                      style: const TextStyle(fontSize: 13),
+                    ),
+                  ),
+                ],
+              ),
+              backgroundColor: const Color(0xFF10B981),
+              behavior: SnackBarBehavior.floating,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              duration: const Duration(seconds: 5),
+            ),
+          );
+          setState(() => _errorMessage = null);
+        }
+      } on FirebaseAuthException catch (e) {
+        final authService = Provider.of<AuthService>(context, listen: false);
+        setState(() => _errorMessage = authService.getErrorMessage(e));
+      } catch (e) {
+        setState(() => _errorMessage = 'No se pudo enviar el correo de recuperación.');
+      }
+    }
+    resetEmailController.dispose();
   }
 
   @override
@@ -486,7 +666,26 @@ class _LoginScreenState extends State<LoginScreen> {
                           onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
                         ),
                       ),
-                      const SizedBox(height: 24),
+                      const SizedBox(height: 8),
+
+                      // Enlace "¿Olvidaste tu contraseña?"
+                      if (!_isRegistering)
+                        Align(
+                          alignment: Alignment.centerRight,
+                          child: GestureDetector(
+                            onTap: _handleForgotPassword,
+                            child: const Text(
+                              '¿Olvidaste tu contraseña?',
+                              style: TextStyle(
+                                color: Color(0xFF2563EB),
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ),
+
+                      const SizedBox(height: 16),
 
                       // Error
                       if (_errorMessage != null)
@@ -674,12 +873,12 @@ class _LoginScreenState extends State<LoginScreen> {
 // Customer Phone Tracking Screen
 // ----------------------------------------------------------------------------
 class CustomerPhoneScreen extends StatefulWidget {
-  final String selectedOrderId;
+  final AppUser appUser;
   final VoidCallback onLogout;
 
   const CustomerPhoneScreen({
     super.key, 
-    required this.selectedOrderId, 
+    required this.appUser, 
     required this.onLogout
   });
 
@@ -688,11 +887,15 @@ class CustomerPhoneScreen extends StatefulWidget {
 }
 
 class _CustomerPhoneScreenState extends State<CustomerPhoneScreen> {
-  late String _selectedOrderId;
+  String? _selectedOrderId;
   bool _showChat = false;
+  int _currentTab = 0; // 0 = Rastreo, 1 = Historial, 2 = Ajustes
+  final Set<String> _ratedOrders = {}; // Órdenes calificadas en esta sesión
   final TextEditingController _chatController = TextEditingController();
   List<LatLng> _clientRoutePoints = [];
   String? _loadedRouteOrderId;
+  String? _dismissedArrivedOrderId;
+  final Map<String, String> _orderStatusCache = {};
 
   void _loadRouteForOrder(Order order) async {
     if (_loadedRouteOrderId == order.id && _clientRoutePoints.isNotEmpty) return;
@@ -727,77 +930,12 @@ class _CustomerPhoneScreenState extends State<CustomerPhoneScreen> {
   @override
   void initState() {
     super.initState();
-    _selectedOrderId = widget.selectedOrderId;
   }
 
   @override
   void dispose() {
     _chatController.dispose();
     super.dispose();
-  }
-
-  Order _getFallbackOrder(String id) {
-    if (id == 'order-1') {
-      return Order(
-        id: 'order-1',
-        item: 'Audífonos Over-Ear',
-        client: 'Emmanuel S.',
-        brand: 'Amazon Prime',
-        status: 'pending',
-        driverName: 'Carlos Ruiz',
-        driverVehicle: 'Motocicleta Honda (Negra) - FHJ-429',
-        passcode: '4829',
-        progress: 0.0,
-        eta: 8,
-        currentX: 20.3720,
-        currentY: -100.0190,
-        destLatitude: 20.3680,
-        destLongitude: -100.0120,
-        chatLogs: [
-          {'sender': 'system', 'text': 'Pedido creado en Amazon Prime', 'timestamp': DateTime.now().millisecondsSinceEpoch}
-        ],
-      );
-    } else if (id == 'order-2') {
-      return Order(
-        id: 'order-2',
-        item: 'Teclado Mecánico',
-        client: 'Sofía L.',
-        brand: 'MercadoLibre',
-        status: 'pending',
-        driverName: 'Sofía López',
-        driverVehicle: 'Yamaha Cripton (Azul) - KLJ-881',
-        passcode: '7721',
-        progress: 0.0,
-        eta: 12,
-        currentX: 20.3720,
-        currentY: -100.0190,
-        destLatitude: 20.3750,
-        destLongitude: -100.0150,
-        chatLogs: [
-          {'sender': 'system', 'text': 'Pedido creado en MercadoLibre', 'timestamp': DateTime.now().millisecondsSinceEpoch}
-        ],
-      );
-    } else {
-      return Order(
-        id: 'order-3',
-        item: 'Smartphone',
-        client: 'Roberto M.',
-        brand: 'DHL Express',
-        status: 'pending',
-        driverName: 'Roberto Gómez',
-        driverVehicle: 'Nissan Urvan (Blanco) - PLM-341',
-        passcode: '9083',
-        progress: 0.0,
-        eta: 6,
-        currentX: 20.3720,
-        currentY: -100.0190,
-        destLatitude: 20.3700,
-        destLongitude: -100.0250,
-        chatLogs: [
-          {'sender': 'system', 'text': 'Pedido creado en DHL Express', 'timestamp': DateTime.now().millisecondsSinceEpoch}
-        ],
-      );
-    }
   }
 
   Color _getBrandColor(String brand) {
@@ -807,92 +945,480 @@ class _CustomerPhoneScreenState extends State<CustomerPhoneScreen> {
     return Colors.blue;
   }
 
+  // Diálogo interactivo premium de calificación del repartidor
+  void _showRatingDialog(BuildContext context, Order order) {
+    int rating = 5;
+    final commentController = TextEditingController();
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              backgroundColor: Colors.white,
+              surfaceTintColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+              title: Column(
+                children: [
+                  const Icon(Icons.stars_rounded, color: Colors.amber, size: 48),
+                  const SizedBox(height: 12),
+                  const Text(
+                    '¡Tu paquete ha llegado!',
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: Colors.black87),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'Califica el servicio de ${order.driverName}',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(fontSize: 12, color: Colors.black54),
+                  ),
+                ],
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Estrellas interactivas
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: List.generate(5, (index) {
+                      final starValue = index + 1;
+                      final isSelected = starValue <= rating;
+                      return IconButton(
+                        onPressed: () {
+                          setDialogState(() {
+                            rating = starValue;
+                          });
+                        },
+                        icon: Icon(
+                          isSelected ? Icons.star_rounded : Icons.star_border_rounded,
+                          color: isSelected ? Colors.amber : Colors.grey.shade400,
+                          size: 36,
+                        ),
+                      );
+                    }),
+                  ),
+                  const SizedBox(height: 14),
+                  TextField(
+                    controller: commentController,
+                    maxLines: 2,
+                    decoration: InputDecoration(
+                      hintText: 'Escribe un comentario sobre la entrega (opcional)...',
+                      hintStyle: const TextStyle(fontSize: 12, color: Colors.black38),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                      contentPadding: const EdgeInsets.all(12),
+                    ),
+                    style: const TextStyle(fontSize: 12, color: Colors.black87),
+                  ),
+                ],
+              ),
+              actionsAlignment: MainAxisAlignment.center,
+              actions: [
+                FilledButton(
+                  onPressed: () async {
+                    // Guardar calificación en Firestore
+                    await FirebaseFirestore.instance.collection('drivers').doc(order.driverId).collection('ratings').add({
+                      'orderId': order.id,
+                      'client': order.client,
+                      'rating': rating,
+                      'comment': commentController.text.trim(),
+                      'timestamp': DateTime.now().millisecondsSinceEpoch,
+                    });
+                    
+                    if (context.mounted) {
+                      Navigator.pop(context);
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('¡Muchas gracias por tu calificación!'),
+                          backgroundColor: Colors.green,
+                        ),
+                      );
+                    }
+                  },
+                  style: FilledButton.styleFrom(
+                    backgroundColor: const Color(0xFF10B981),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
+                  ),
+                  child: const Text('Enviar Calificación', style: TextStyle(fontWeight: FontWeight.bold)),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  // Vista de historial de entregas pasadas
+  Widget _buildHistoryView(List<Order> allOrders) {
+    // Filtrar entregados de este cliente (que no estén archivados por el cliente)
+    final historyOrders = allOrders.where((o) => o.status == 'delivered' && !o.clientArchived).toList();
+
+    if (historyOrders.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: const [
+            Icon(Icons.history_toggle_off_rounded, size: 64, color: Colors.grey),
+            SizedBox(height: 16),
+            Text(
+              'No tienes entregas pasadas registradas.',
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Colors.black54),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return ListView.builder(
+      padding: const EdgeInsets.all(16),
+      itemCount: historyOrders.length,
+      itemBuilder: (context, index) {
+        final order = historyOrders[index];
+        final brandColor = _getBrandColor(order.brand);
+
+        return Card(
+          color: Colors.white,
+          surfaceTintColor: Colors.white,
+          elevation: 0,
+          margin: const EdgeInsets.only(bottom: 12),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+            side: const BorderSide(color: Color(0xFFE5E7EB)),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      order.brand,
+                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: brandColor),
+                    ),
+                    const Card(
+                      color: Color(0xFFD1FAE5),
+                      elevation: 0,
+                      child: Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                        child: Text(
+                          'ENTREGADO',
+                          style: TextStyle(color: Color(0xFF065F46), fontSize: 9, fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  order.item,
+                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: Colors.black87),
+                ),
+                const SizedBox(height: 4),
+                Text('Código de Orden: #${order.id.split('-').last.toUpperCase()}', style: const TextStyle(fontSize: 11, color: Colors.black45)),
+                const Divider(height: 24, color: Color(0xFFF3F4F6)),
+                Row(
+                  children: [
+                    CircleAvatar(
+                      radius: 14,
+                      backgroundColor: brandColor.withOpacity(0.1),
+                      child: Icon(Icons.person_rounded, size: 14, color: brandColor),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text('Entregado por:', style: TextStyle(fontSize: 9, color: Colors.black45)),
+                          Text(
+                            order.driverName,
+                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Colors.black87),
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.archive_outlined, color: Colors.grey, size: 20),
+                      tooltip: 'Archivar e ir a estado de no verlo más',
+                      onPressed: () async {
+                        final firestoreService = Provider.of<FirestoreService>(context, listen: false);
+                        await firestoreService.archiveOrderForClient(order.id);
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('Pedido archivado e historial limpiado.'),
+                              backgroundColor: Colors.blueGrey,
+                            ),
+                          );
+                        }
+                      },
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  void _checkAndShowNotifications(List<Order> orders) {
+    final settings = Provider.of<AppSettings>(context, listen: false);
+    // Si el usuario desactivó las notificaciones en sus ajustes, no lanzamos nada
+    if (!settings.receiveNotifications) return;
+
+    for (final order in orders) {
+      final previousStatus = _orderStatusCache[order.id];
+      if (previousStatus != null && previousStatus != order.status) {
+        // El estado cambió
+        String title = '';
+        String body = '';
+
+        if (order.status == 'accepted') {
+          title = '📦 ¡Paquete Asignado!';
+          body = 'Tu pedido de ${order.brand} (${order.item}) ha sido asignado al repartidor ${order.driverName}.';
+        } else if (order.status == 'in_transit') {
+          title = '⚡ ¡Pedido en camino!';
+          body = 'El repartidor va rumbo a tu dirección para entregarte: ${order.item}.';
+        } else if (order.status == 'arrived') {
+          title = '🔔 ¡El repartidor está afuera!';
+          body = 'Tu paquete llegó. Entrégale este PIN para confirmar la entrega: ${order.passcode}';
+        } else if (order.status == 'delivered') {
+          title = '✓ ¡Paquete Entregado!';
+          body = 'Se ha entregado con éxito tu producto: ${order.item}. ¡Gracias por usar DelivEcosys!';
+        }
+
+        if (title.isNotEmpty) {
+          NotificationService().showNotification(
+            id: order.id.hashCode,
+            title: title,
+            body: body,
+          );
+        }
+      }
+      // Actualizar la caché de estados
+      _orderStatusCache[order.id] = order.status;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final firestoreService = Provider.of<FirestoreService>(context, listen: false);
 
     return Scaffold(
-      backgroundColor: const Color(0xFFF9FAFB),
       body: SafeArea(
         child: StreamBuilder<List<Order>>(
-          stream: firestoreService.getOrdersStream(),
+          stream: firestoreService.getOrdersForClient(widget.appUser.uid),
           builder: (context, snapshot) {
             if (snapshot.connectionState == ConnectionState.waiting) {
               return const Center(child: CircularProgressIndicator());
             }
             final orders = snapshot.data ?? [];
-            final bool isLive = snapshot.hasData && orders.any((o) => o.id == _selectedOrderId);
-            Order? activeOrder;
-            
-            try {
-              activeOrder = orders.firstWhere((o) => o.id == _selectedOrderId);
-            } catch (_) {
-              activeOrder = _getFallbackOrder(_selectedOrderId);
+            _checkAndShowNotifications(orders);
+
+            // Si no hay órdenes y estamos en la pestaña 0 (Rastreo), mostrar estado vacío
+            if (orders.isEmpty && _currentTab == 0) {
+              return Column(
+                children: [
+                  _buildAppHeaderEmpty(),
+                  Expanded(
+                    child: _buildNoOrdersState(),
+                  ),
+                ],
+              );
             }
 
-            if (activeOrder.status != 'pending') {
+            // Auto-seleccionar la primera orden si no hay selección
+            if (orders.isNotEmpty && (_selectedOrderId == null || !orders.any((o) => o.id == _selectedOrderId))) {
+              _selectedOrderId = orders.first.id;
+            }
+
+            final bool isLive = snapshot.hasData && orders.any((o) => o.id == _selectedOrderId);
+            Order? activeOrder;
+            if (orders.isNotEmpty && _selectedOrderId != null) {
+              try {
+                activeOrder = orders.firstWhere((o) => o.id == _selectedOrderId);
+              } catch (_) {
+                activeOrder = orders.first;
+              }
+            }
+
+            // Monitorear e interceptar cuando el pedido cambie a entregado para detonar calificación
+            if (activeOrder != null && activeOrder.status == 'delivered' && !_ratedOrders.contains(activeOrder.id)) {
+              _ratedOrders.add(activeOrder.id);
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                _showRatingDialog(context, activeOrder!);
+              });
+            }
+
+            if (activeOrder != null && activeOrder.status != 'pending') {
               _loadRouteForOrder(activeOrder);
             } else {
               _clientRoutePoints = [];
               _loadedRouteOrderId = null;
             }
 
+            Widget currentView;
+            switch (_currentTab) {
+              case 1:
+                currentView = _buildHistoryView(orders);
+                break;
+              case 2:
+                currentView = _buildSettingsView();
+                break;
+              default:
+                currentView = activeOrder == null
+                    ? _buildNoOrdersState()
+                    : (activeOrder.status == 'pending'
+                        ? _buildEmptyState(activeOrder)
+                        : _buildTrackingScreen(activeOrder, firestoreService));
+            }
+
             return Stack(
               children: [
                 Column(
                   children: [
-                    // App Bar Client Switcher & Logout
-                    _buildAppHeader(activeOrder, isLive: isLive),
+                    // Header de la App
+                    if (_currentTab == 0 && activeOrder != null)
+                      _buildAppHeader(activeOrder, isLive: isLive, allOrders: orders)
+                    else
+                      _buildAppHeaderTitle(),
 
-                    if (!isLive)
-                      Container(
-                        width: double.infinity,
-                        color: Colors.amber.shade50,
-                        padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 16),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(Icons.warning_amber_rounded, size: 14, color: Colors.amber.shade900),
-                            const SizedBox(width: 6),
-                            Text(
-                              'Conexión local simulada (Presiona "Reset DB" en Repartidor para activar)',
-                              style: TextStyle(color: Colors.amber.shade900, fontSize: 10, fontWeight: FontWeight.bold),
-                            ),
-                          ],
-                        ),
-                      ),
-
-                    // Main tracker body
                     Expanded(
-                      child: activeOrder.status == 'pending'
-                          ? _buildEmptyState(activeOrder)
-                          : _buildTrackingScreen(activeOrder, firestoreService),
+                      child: currentView,
                     ),
                   ],
                 ),
 
+                // Banner Superior Flotante Animado de Llegada
+                if (activeOrder != null && activeOrder.status == 'arrived' && _dismissedArrivedOrderId != activeOrder.id)
+                  Positioned(
+                    top: 16,
+                    left: 16,
+                    right: 16,
+                    child: Material(
+                      elevation: 12,
+                      borderRadius: BorderRadius.circular(16),
+                      color: Colors.transparent,
+                      child: Container(
+                        decoration: BoxDecoration(
+                          gradient: const LinearGradient(
+                            colors: [Color(0xFF2563EB), Color(0xFF1D4ED8)],
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                          ),
+                          borderRadius: BorderRadius.circular(16),
+                          boxShadow: [
+                            BoxShadow(
+                              color: const Color(0xFF2563EB).withOpacity(0.3),
+                              blurRadius: 12,
+                              offset: const Offset(0, 4),
+                            )
+                          ],
+                        ),
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                        child: Row(
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.all(8),
+                              decoration: BoxDecoration(
+                                color: Colors.white.withOpacity(0.2),
+                                shape: BoxShape.circle,
+                              ),
+                              child: const Icon(Icons.flash_on_rounded, color: Colors.white, size: 20),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Text(
+                                    '¡Tu Repartidor Llegó!',
+                                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.white),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    'Código de Entrega: ${activeOrder.passcode}',
+                                    style: const TextStyle(fontSize: 11, color: Colors.white70, fontWeight: FontWeight.w500),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            IconButton(
+                              onPressed: () {
+                                setState(() {
+                                  _dismissedArrivedOrderId = activeOrder!.id;
+                                });
+                              },
+                              icon: const Icon(Icons.close_rounded, color: Colors.white70, size: 18),
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints(),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+
                 // Chat Overlay panel
-                if (_showChat)
+                if (_showChat && activeOrder != null)
                   _buildChatOverlay(activeOrder, firestoreService, 'client'),
               ],
             );
           },
         ),
       ),
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: _currentTab,
+        onTap: (index) {
+          setState(() {
+            _currentTab = index;
+            _showChat = false;
+          });
+        },
+        selectedItemColor: const Color(0xFF2563EB),
+        unselectedItemColor: Colors.grey,
+        showUnselectedLabels: true,
+        elevation: 8,
+        items: const [
+          BottomNavigationBarItem(
+            icon: Icon(Icons.map_outlined),
+            activeIcon: Icon(Icons.map),
+            label: 'Rastreo',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.history_rounded),
+            label: 'Historial',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.settings_outlined),
+            activeIcon: Icon(Icons.settings),
+            label: 'Ajustes',
+          ),
+        ],
+      ),
     );
   }
 
-  Widget _buildAppHeader(Order order, {required bool isLive}) {
+  Widget _buildAppHeader(Order order, {required bool isLive, required List<Order> allOrders}) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return Container(
       height: 56,
-      decoration: const BoxDecoration(
-        color: Colors.white,
-        border: Border(bottom: BorderSide(color: Color(0xFFE5E7EB))),
+      decoration: BoxDecoration(
+        color: isDark ? const Color(0xFF1E293B) : Colors.white,
+        border: Border(bottom: BorderSide(color: isDark ? const Color(0xFF334155) : const Color(0xFFE5E7EB))),
       ),
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
+          // Logo/Brand Avatar
           CircleAvatar(
             backgroundColor: _getBrandColor(order.brand).withOpacity(0.1),
             radius: 18,
@@ -902,51 +1428,154 @@ class _CustomerPhoneScreenState extends State<CustomerPhoneScreen> {
               size: 18,
             ),
           ),
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 8,
-                height: 8,
-                margin: const EdgeInsets.only(right: 6),
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: isLive ? const Color(0xFF10B981) : Colors.amber,
-                ),
-              ),
-              DropdownButtonHideUnderline(
-                child: DropdownButton<String>(
-                  value: _selectedOrderId,
-                  dropdownColor: Colors.white,
-                  icon: const Icon(Icons.keyboard_arrow_down, color: Colors.black54, size: 20),
-                  style: const TextStyle(
-                    fontWeight: FontWeight.bold, 
-                    color: Colors.black87, 
-                    fontSize: 14,
-                    fontFamily: 'Roboto',
+          const SizedBox(width: 12),
+          // Selector de pedido activo
+          Expanded(
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 8,
+                  height: 8,
+                  margin: const EdgeInsets.only(right: 6),
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: isLive ? const Color(0xFF10B981) : Colors.amber,
                   ),
-                  items: const [
-                    DropdownMenuItem(value: 'order-1', child: Text('Servicio: Amazon Prime')),
-                    DropdownMenuItem(value: 'order-2', child: Text('Servicio: MercadoLibre')),
-                    DropdownMenuItem(value: 'order-3', child: Text('Servicio: DHL Express')),
-                  ],
-                  onChanged: (val) {
-                    if (val != null) {
-                      setState(() {
-                        _selectedOrderId = val;
-                        _showChat = false;
-                      });
-                    }
-                  },
                 ),
-              ),
-            ],
+                Flexible(
+                  child: DropdownButtonHideUnderline(
+                    child: DropdownButton<String>(
+                      value: _selectedOrderId,
+                      dropdownColor: isDark ? const Color(0xFF1E293B) : Colors.white,
+                      icon: const Icon(Icons.keyboard_arrow_down, color: Colors.black54, size: 20),
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold, 
+                        color: isDark ? Colors.white : Colors.black87, 
+                        fontSize: 13,
+                        fontFamily: 'Roboto',
+                      ),
+                      isExpanded: true,
+                      items: allOrders
+                          .where((o) => o.status != 'delivered')
+                          .map((o) => DropdownMenuItem(
+                                value: o.id,
+                                child: Text(
+                                  '${o.brand}: ${o.item}',
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ))
+                          .toList(),
+                      onChanged: (val) {
+                        if (val != null) {
+                          setState(() {
+                            _selectedOrderId = val;
+                            _showChat = false;
+                          });
+                        }
+                      },
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
-          IconButton(
-            onPressed: widget.onLogout,
-            icon: const Icon(Icons.logout, size: 20, color: Colors.redAccent),
-            tooltip: 'Cerrar Sesión',
-          )
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAppHeaderEmpty() {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return Container(
+      height: 56,
+      decoration: BoxDecoration(
+        color: isDark ? const Color(0xFF1E293B) : Colors.white,
+        border: Border(bottom: BorderSide(color: isDark ? const Color(0xFF334155) : const Color(0xFFE5E7EB))),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          CircleAvatar(
+            backgroundColor: const Color(0xFFEEF2FF),
+            radius: 18,
+            child: Icon(Icons.local_shipping_rounded, color: const Color(0xFF2563EB), size: 18),
+          ),
+          Text(
+            'DelivEcosys',
+            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: isDark ? Colors.white : Colors.black87),
+          ),
+          const SizedBox(width: 36), // Espaciador visual
+        ],
+      ),
+    );
+  }
+
+  // Estado vacío cuando el cliente no tiene paquetes asignados
+  Widget _buildNoOrdersState() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 32.0, vertical: 48.0),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Container(
+            width: 100,
+            height: 100,
+            decoration: BoxDecoration(
+              color: const Color(0xFFEEF2FF),
+              shape: BoxShape.circle,
+              boxShadow: [
+                BoxShadow(
+                  color: const Color(0xFF2563EB).withOpacity(0.1),
+                  blurRadius: 24,
+                  spreadRadius: 4,
+                ),
+              ],
+            ),
+            child: const Icon(Icons.inventory_2_outlined, color: Color(0xFF2563EB), size: 48),
+          ),
+          const SizedBox(height: 28),
+          const Text(
+            'Sin paquetes por el momento',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontWeight: FontWeight.bold,
+              fontSize: 20,
+              color: Color(0xFF0F172A),
+            ),
+          ),
+          const SizedBox(height: 10),
+          const Text(
+            'Cuando la paquetería registre un envío a tu nombre, aparecerá aquí automáticamente con seguimiento en tiempo real.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: Color(0xFF64748B),
+              fontSize: 13,
+              height: 1.5,
+            ),
+          ),
+          const SizedBox(height: 32),
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF0FDF4),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: const Color(0xFFBBF7D0)),
+            ),
+            child: const Row(
+              children: [
+                Icon(Icons.info_outline_rounded, color: Color(0xFF16A34A), size: 20),
+                SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    'Tu correo electrónico está vinculado a esta cuenta. El administrador usará tu correo para asignarte paquetes.',
+                    style: TextStyle(color: Color(0xFF166534), fontSize: 11, height: 1.4),
+                  ),
+                ),
+              ],
+            ),
+          ),
         ],
       ),
     );
@@ -1190,6 +1819,83 @@ class _CustomerPhoneScreenState extends State<CustomerPhoneScreen> {
           ),
         ),
         const SizedBox(height: 16),
+
+        // Alerta Destacada cuando el repartidor ha llegado
+        if (order.status == 'arrived') ...[
+          Container(
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [Color(0xFF10B981), Color(0xFF059669)],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
+              borderRadius: BorderRadius.circular(20),
+              boxShadow: [
+                BoxShadow(
+                  color: const Color(0xFF10B981).withOpacity(0.4),
+                  blurRadius: 16,
+                  offset: const Offset(0, 8),
+                )
+              ],
+            ),
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.2),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(Icons.notifications_active_rounded, color: Colors.white, size: 24),
+                    ),
+                    const SizedBox(width: 14),
+                    const Expanded(
+                      child: Text(
+                        '¡EL REPARTIDOR HA LLEGADO!',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'Muestra este código de seguridad para recibir y confirmar tu paquete:',
+                  style: TextStyle(fontSize: 12, color: Colors.white70),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(16),
+                    boxShadow: const [
+                      BoxShadow(color: Colors.black12, blurRadius: 4, offset: Offset(0, 2))
+                    ],
+                  ),
+                  child: Text(
+                    order.passcode,
+                    style: const TextStyle(
+                      fontSize: 28,
+                      fontWeight: FontWeight.w900,
+                      color: Color(0xFF059669),
+                      letterSpacing: 4,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+        ],
 
         // Información de entrega y Código de Seguridad (Passcode)
         Container(
@@ -1517,6 +2223,199 @@ class _CustomerPhoneScreenState extends State<CustomerPhoneScreen> {
     if (status == 'arrived') return '¡Repartidor afuera!';
     if (status == 'delivered') return '✓ Entregado con éxito';
     return 'Procesando';
+  }
+
+  // Header de la app estático para pantallas secundarias
+  Widget _buildAppHeaderTitle() {
+    String title = '';
+    IconData icon = Icons.info_outline;
+    if (_currentTab == 1) {
+      title = 'Historial de Entregas';
+      icon = Icons.history_rounded;
+    } else if (_currentTab == 2) {
+      title = 'Ajustes del Sistema';
+      icon = Icons.settings_rounded;
+    }
+
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    return Container(
+      height: 56,
+      decoration: BoxDecoration(
+        color: isDark ? const Color(0xFF1E293B) : Colors.white,
+        border: Border(bottom: BorderSide(color: isDark ? const Color(0xFF334155) : const Color(0xFFE5E7EB))),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Row(
+        children: [
+          Icon(icon, color: const Color(0xFF2563EB), size: 20),
+          const SizedBox(width: 12),
+          Text(
+            title,
+            style: TextStyle(
+              fontWeight: FontWeight.bold,
+              fontSize: 16,
+              color: isDark ? Colors.white : Colors.black87,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Vista de Ajustes Premium y Configuración
+  Widget _buildSettingsView() {
+    final settings = Provider.of<AppSettings>(context);
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    return ListView(
+      padding: const EdgeInsets.all(20),
+      children: [
+        // Tarjeta de perfil
+        Card(
+          elevation: 0,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+            side: BorderSide(color: isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0)),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(
+              children: [
+                CircleAvatar(
+                  radius: 28,
+                  backgroundColor: const Color(0xFF2563EB).withOpacity(0.1),
+                  child: const Icon(Icons.person_rounded, size: 28, color: Color(0xFF2563EB)),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        widget.appUser.name,
+                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        widget.appUser.email,
+                        style: const TextStyle(fontSize: 12, color: Colors.grey),
+                      ),
+                      const SizedBox(height: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF3B82F6).withOpacity(0.15),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: const Text(
+                          'CLIENTE',
+                          style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: Color(0xFF2563EB)),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        
+        const SizedBox(height: 24),
+        const Text(
+          'PREFERENCIAS DE LA APLICACIÓN',
+          style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.grey, letterSpacing: 0.5),
+        ),
+        const SizedBox(height: 10),
+
+        // Ajustes de la App
+        Card(
+          elevation: 0,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+            side: BorderSide(color: isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0)),
+          ),
+          child: Column(
+            children: [
+              // Interruptor de Modo Oscuro
+              SwitchListTile(
+                title: const Text('Modo Noche', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                subtitle: const Text('Cambiar la aplicación a colores oscuros', style: TextStyle(fontSize: 11, color: Colors.grey)),
+                value: settings.themeMode == ThemeMode.dark,
+                activeColor: const Color(0xFF2563EB),
+                secondary: const Icon(Icons.dark_mode_outlined),
+                onChanged: (val) {
+                  settings.toggleTheme(val);
+                },
+              ),
+              const Divider(height: 1),
+              // Recibir Notificaciones
+              SwitchListTile(
+                title: const Text('Notificaciones en Tiempo Real', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                subtitle: const Text('Recibir avisos emergentes sobre tus entregas', style: TextStyle(fontSize: 11, color: Colors.grey)),
+                value: settings.receiveNotifications,
+                activeColor: const Color(0xFF2563EB),
+                secondary: const Icon(Icons.notifications_active_outlined),
+                onChanged: (val) {
+                  settings.setReceiveNotifications(val);
+                },
+              ),
+            ],
+          ),
+        ),
+
+        const SizedBox(height: 24),
+        const Text(
+          'INFORMACIÓN Y SOPORTE',
+          style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.grey, letterSpacing: 0.5),
+        ),
+        const SizedBox(height: 10),
+
+        Card(
+          elevation: 0,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+            side: BorderSide(color: isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0)),
+          ),
+          child: Column(
+            children: [
+              ListTile(
+                leading: const Icon(Icons.help_outline_rounded),
+                title: const Text('Centro de Soporte', style: TextStyle(fontSize: 13)),
+                trailing: const Icon(Icons.chevron_right, size: 18),
+                onTap: () {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Soporte simulado - Contacta al Administrador.')),
+                  );
+                },
+              ),
+              const Divider(height: 1),
+              ListTile(
+                leading: const Icon(Icons.info_outline_rounded),
+                title: const Text('Acerca de DelivEcosys', style: TextStyle(fontSize: 13)),
+                subtitle: const Text('Versión 1.0.0 (Xiaomi X7 Premium Edition)', style: TextStyle(fontSize: 10)),
+                trailing: const Icon(Icons.chevron_right, size: 18),
+                onTap: () {},
+              ),
+            ],
+          ),
+        ),
+
+        const SizedBox(height: 32),
+        ElevatedButton.icon(
+          onPressed: widget.onLogout,
+          icon: const Icon(Icons.logout),
+          label: const Text('Cerrar Sesión'),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Colors.red.shade50,
+            foregroundColor: Colors.red,
+            elevation: 0,
+            padding: const EdgeInsets.symmetric(vertical: 14),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          ),
+        ),
+      ],
+    );
   }
 }
 
@@ -2226,9 +3125,9 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
               
               // Filtrar pedidos para mostrar:
               // 1. Pedidos sin asignar ('pending')
-              // 2. Pedidos asignados a este repartidor
+              // 2. Pedidos asignados a este repartidor y no archivados
               final orders = allOrders.where((o) {
-                return o.status == 'pending' || o.driverId == widget.appUser.uid;
+                return (o.status == 'pending' || o.driverId == widget.appUser.uid) && !o.driverArchived;
               }).toList();
 
               final activeRoutes = orders.where((o) => o.status != 'pending' && o.status != 'delivered').toList();
@@ -2456,6 +3355,30 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
                               child: const Text('Aceptar Pedido', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
                             ),
                           ),
+                        if (order.status == 'delivered' && order.driverId == widget.appUser.uid)
+                          SizedBox(
+                            width: double.infinity,
+                            child: OutlinedButton.icon(
+                              onPressed: () async {
+                                await firestoreService.archiveOrderForDriver(order.id);
+                                if (context.mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text('Entrega archivada correctamente.'),
+                                      backgroundColor: Colors.blueGrey,
+                                    ),
+                                  );
+                                }
+                              },
+                              style: OutlinedButton.styleFrom(
+                                foregroundColor: Colors.blueGrey,
+                                side: const BorderSide(color: Colors.blueGrey),
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                              ),
+                              icon: const Icon(Icons.archive_outlined, size: 16),
+                              label: const Text('Archivar Entrega', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                            ),
+                          ),
                       ],
                     ),
                   ),
@@ -2479,16 +3402,39 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       const Text('PEDIDO EN CURSO', style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.grey)),
-                      // Toggle Chat for driver
-                      IconButton(
-                        onPressed: () => setState(() => _showChat = true),
-                        constraints: const BoxConstraints(),
-                        padding: EdgeInsets.zero,
-                        icon: Badge(
-                          label: Text(selectedOrder.chatLogs.where((l) => l['sender'] == 'client').length.toString()),
-                          isLabelVisible: selectedOrder.chatLogs.where((l) => l['sender'] == 'client').isNotEmpty,
-                          child: Icon(Icons.chat_bubble_outline, color: _getBrandColor(selectedOrder.brand), size: 20),
-                        ),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            onPressed: () async {
+                              final url = 'https://www.google.com/maps/search/?api=1&query=${selectedOrder.destLatitude},${selectedOrder.destLongitude}';
+                              if (await canLaunchUrl(Uri.parse(url))) {
+                                await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+                              } else {
+                                if (mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(content: Text('No se pudo abrir el mapa de navegación externa')),
+                                  );
+                                }
+                              }
+                            },
+                            constraints: const BoxConstraints(),
+                            padding: const EdgeInsets.only(right: 12),
+                            icon: Icon(Icons.near_me_rounded, color: _getBrandColor(selectedOrder.brand), size: 20),
+                            tooltip: 'Navegar en Google Maps',
+                          ),
+                          // Toggle Chat for driver
+                          IconButton(
+                            onPressed: () => setState(() => _showChat = true),
+                            constraints: const BoxConstraints(),
+                            padding: EdgeInsets.zero,
+                            icon: Badge(
+                              label: Text(selectedOrder.chatLogs.where((l) => l['sender'] == 'client').length.toString()),
+                              isLabelVisible: selectedOrder.chatLogs.where((l) => l['sender'] == 'client').isNotEmpty,
+                              child: Icon(Icons.chat_bubble_outline, color: _getBrandColor(selectedOrder.brand), size: 20),
+                            ),
+                          ),
+                        ],
                       )
                     ],
                   ),
@@ -2755,24 +3701,29 @@ class _RiderDashboardScreenState extends State<RiderDashboardScreen> {
         Positioned(
           top: 12,
           right: 12,
-          child: Material(
-            type: MaterialType.transparency,
-            child: Tooltip(
-              message: 'Configurar Mapa',
-              child: FloatingActionButton.small(
-                heroTag: selectedOrder != null
-                    ? 'map_settings_rider_${selectedOrder.id}'
-                    : 'map_settings_rider_none',
-                onPressed: () {
-                  showMapSettingsDialog(context, () {
-                    setState(() {});
-                  });
-                },
-                backgroundColor: Colors.white.withOpacity(0.9),
-                elevation: 2,
-                child: const Icon(Icons.layers_rounded, color: Colors.black87, size: 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Material(
+                type: MaterialType.transparency,
+                child: Tooltip(
+                  message: 'Configurar Mapa',
+                  child: FloatingActionButton.small(
+                    heroTag: selectedOrder != null
+                        ? 'map_settings_rider_${selectedOrder.id}'
+                        : 'map_settings_rider_none',
+                    onPressed: () {
+                      showMapSettingsDialog(context, () {
+                        setState(() {});
+                      });
+                    },
+                    backgroundColor: Colors.white.withOpacity(0.9),
+                    elevation: 2,
+                    child: const Icon(Icons.layers_rounded, color: Colors.black87, size: 20),
+                  ),
+                ),
               ),
-            ),
+            ],
           ),
         ),
         if (selectedOrder == null)
@@ -3624,10 +4575,49 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> with SingleTickerPr
                             ),
                           ],
                         ),
-                        const SizedBox(height: 8),
-                        Text(
-                          'Pedido: #${order.id.split('-').last.toUpperCase()}',
-                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: Colors.black87),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              'Pedido: #${order.id.split('-').last.toUpperCase()}',
+                              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: Colors.black87),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.delete_outline_rounded, color: Colors.redAccent, size: 20),
+                              tooltip: 'Eliminar Pedido',
+                              onPressed: () {
+                                showDialog(
+                                  context: context,
+                                  builder: (ctx) => AlertDialog(
+                                    title: const Text('Eliminar Pedido', style: TextStyle(fontWeight: FontWeight.bold)),
+                                    content: Text('¿Estás seguro de que deseas eliminar permanentemente el pedido #${order.id.split('-').last.toUpperCase()}?'),
+                                    actions: [
+                                      TextButton(
+                                        onPressed: () => Navigator.pop(ctx),
+                                        child: const Text('Cancelar', style: TextStyle(color: Colors.black54)),
+                                      ),
+                                      ElevatedButton(
+                                        onPressed: () async {
+                                          Navigator.pop(ctx);
+                                          await firestoreService.deleteOrder(order.id);
+                                          if (context.mounted) {
+                                            ScaffoldMessenger.of(context).showSnackBar(
+                                              const SnackBar(
+                                                content: Text('Pedido eliminado permanentemente.'),
+                                                backgroundColor: Colors.redAccent,
+                                              ),
+                                            );
+                                          }
+                                        },
+                                        style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+                                        child: const Text('Eliminar', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              },
+                            ),
+                          ],
                         ),
                         const SizedBox(height: 6),
                         Text('Producto: ${order.item}', style: const TextStyle(fontSize: 12, color: Colors.black54)),
@@ -3748,6 +4738,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> with SingleTickerPr
                       ),
                       contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                     ),
+                    isExpanded: true,
                     items: drivers.map((driver) {
                       Color statusColor;
                       switch (driver.status) {
@@ -3766,9 +4757,12 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> with SingleTickerPr
                           children: [
                             Icon(Icons.circle, size: 8, color: statusColor),
                             const SizedBox(width: 8),
-                            Text(
-                              '${driver.name} (${driver.vehicle})',
-                              style: const TextStyle(fontSize: 13, color: Colors.black87),
+                            Expanded(
+                              child: Text(
+                                '${driver.name} (${driver.vehicle})',
+                                style: const TextStyle(fontSize: 13, color: Colors.black87),
+                                overflow: TextOverflow.ellipsis,
+                              ),
                             ),
                           ],
                         ),
@@ -3826,6 +4820,433 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> with SingleTickerPr
     );
   }
 
+  // ---------------------------------------------------------------------------
+  // DIÁLOGO DE CREACIÓN DE PAQUETE CON ESCÁNER
+  // ---------------------------------------------------------------------------
+  void _showCreateOrderDialog() {
+    final itemController = TextEditingController();
+    final trackingController = TextEditingController();
+    final clientEmailController = TextEditingController();
+    final addressController = TextEditingController(text: 'Calle Juárez #123, Centro');
+    final latController = TextEditingController(text: '20.3700');
+    final lngController = TextEditingController(text: '-100.0150');
+
+    String selectedBrand = 'Amazon Prime';
+    String selectedDestinationPreset = 'Centro de Distribución';
+    String? foundClientName;
+    String? foundClientId;
+    String? orderError;
+    bool isSearching = false;
+
+    final brands = ['Amazon Prime', 'MercadoLibre', 'DHL Express', 'FedEx', 'Estafeta', 'UPS', 'Otro'];
+    final destinationPresets = [
+      'Centro de Distribución',
+      'Oficina Satélite Norte',
+      'Plaza Principal',
+      'Coordenadas Manuales'
+    ];
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            final isManual = selectedDestinationPreset == 'Coordenadas Manuales';
+
+            return AlertDialog(
+              backgroundColor: Colors.white,
+              surfaceTintColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              title: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF3B82F6).withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Icon(Icons.inventory_2_rounded, color: Color(0xFF3B82F6), size: 22),
+                  ),
+                  const SizedBox(width: 12),
+                  const Text(
+                    'Registrar Paquete',
+                    style: TextStyle(color: Colors.black87, fontWeight: FontWeight.bold, fontSize: 18),
+                  ),
+                ],
+              ),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (orderError != null)
+                      Container(
+                        margin: const EdgeInsets.only(bottom: 16),
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: Colors.red.withOpacity(0.1),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.redAccent.withOpacity(0.3)),
+                        ),
+                        child: Text(orderError!, style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
+                      ),
+
+                    // ── Escáner de código de barras ──
+                    const Text('Código de Rastreo', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.black54)),
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: trackingController,
+                            style: const TextStyle(fontSize: 14, color: Colors.black87),
+                            decoration: InputDecoration(
+                              hintText: 'Ej: AMZ-2024-001',
+                              hintStyle: const TextStyle(color: Colors.black26),
+                              filled: true,
+                              fillColor: const Color(0xFFF1F5F9),
+                              border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+                              contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Material(
+                          color: const Color(0xFF3B82F6),
+                          borderRadius: BorderRadius.circular(10),
+                          child: InkWell(
+                            borderRadius: BorderRadius.circular(10),
+                            onTap: () {
+                              Navigator.of(context).push(
+                                MaterialPageRoute(
+                                  builder: (_) => _BarcodeScannerScreen(
+                                    onScanned: (code) {
+                                      setDialogState(() {
+                                        trackingController.text = code;
+                                        if (itemController.text.isEmpty) {
+                                          itemController.text = 'Paquete $code';
+                                        }
+                                      });
+                                    },
+                                  ),
+                                ),
+                              );
+                            },
+                            child: const Padding(
+                              padding: EdgeInsets.all(12),
+                              child: Icon(Icons.qr_code_scanner_rounded, color: Colors.white, size: 22),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+
+                    const SizedBox(height: 16),
+
+                    // ── Nombre del producto ──
+                    const Text('Producto', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.black54)),
+                    const SizedBox(height: 6),
+                    TextField(
+                      controller: itemController,
+                      style: const TextStyle(fontSize: 14, color: Colors.black87),
+                      decoration: InputDecoration(
+                        hintText: 'Ej: Audífonos Bluetooth',
+                        hintStyle: const TextStyle(color: Colors.black26),
+                        filled: true,
+                        fillColor: const Color(0xFFF1F5F9),
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                      ),
+                    ),
+
+                    const SizedBox(height: 16),
+
+                    // ── Paquetería ──
+                    const Text('Paquetería', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.black54)),
+                    const SizedBox(height: 6),
+                    DropdownButtonFormField<String>(
+                      value: selectedBrand,
+                      dropdownColor: Colors.white,
+                      decoration: InputDecoration(
+                        filled: true,
+                        fillColor: const Color(0xFFF1F5F9),
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                      ),
+                      items: brands.map((b) => DropdownMenuItem(value: b, child: Text(b, style: const TextStyle(fontSize: 14)))).toList(),
+                      onChanged: (val) {
+                        if (val != null) setDialogState(() => selectedBrand = val);
+                      },
+                    ),
+
+                    const SizedBox(height: 16),
+
+                    // ── Dirección descriptiva ──
+                    const Text('Dirección de Entrega', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.black54)),
+                    const SizedBox(height: 6),
+                    TextField(
+                      controller: addressController,
+                      style: const TextStyle(fontSize: 14, color: Colors.black87),
+                      decoration: InputDecoration(
+                        hintText: 'Ej: Calle Juárez #123, Centro',
+                        hintStyle: const TextStyle(color: Colors.black26),
+                        filled: true,
+                        fillColor: const Color(0xFFF1F5F9),
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                      ),
+                    ),
+
+                    const SizedBox(height: 16),
+
+                    // ── Ubicación de entrega (Mapa Coordenadas) ──
+                    const Text('Punto de Entrega (Coordenadas)', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.black54)),
+                    const SizedBox(height: 6),
+                    DropdownButtonFormField<String>(
+                      value: selectedDestinationPreset,
+                      dropdownColor: Colors.white,
+                      decoration: InputDecoration(
+                        filled: true,
+                        fillColor: const Color(0xFFF1F5F9),
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                      ),
+                      items: destinationPresets.map((p) => DropdownMenuItem(value: p, child: Text(p, style: const TextStyle(fontSize: 13)))).toList(),
+                      onChanged: (val) {
+                        if (val != null) {
+                          setDialogState(() {
+                            selectedDestinationPreset = val;
+                            if (val == 'Centro de Distribución') {
+                              latController.text = '20.3700';
+                              lngController.text = '-100.0150';
+                            } else if (val == 'Oficina Satélite Norte') {
+                              latController.text = '20.3850';
+                              lngController.text = '-100.0120';
+                            } else if (val == 'Plaza Principal') {
+                              latController.text = '20.3600';
+                              lngController.text = '-100.0300';
+                            }
+                          });
+                        }
+                      },
+                    ),
+
+                    if (isManual) ...[
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text('Latitud', style: TextStyle(fontSize: 11, color: Colors.black54)),
+                                const SizedBox(height: 4),
+                                TextField(
+                                  controller: latController,
+                                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                                  style: const TextStyle(fontSize: 13),
+                                  decoration: InputDecoration(
+                                    filled: true,
+                                    fillColor: const Color(0xFFF1F5F9),
+                                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
+                                    contentPadding: const EdgeInsets.all(10),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text('Longitud', style: TextStyle(fontSize: 11, color: Colors.black54)),
+                                const SizedBox(height: 4),
+                                TextField(
+                                  controller: lngController,
+                                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                                  style: const TextStyle(fontSize: 13),
+                                  decoration: InputDecoration(
+                                    filled: true,
+                                    fillColor: const Color(0xFFF1F5F9),
+                                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
+                                    contentPadding: const EdgeInsets.all(10),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+
+                    const SizedBox(height: 16),
+                    const Divider(),
+                    const SizedBox(height: 8),
+
+                    // ── Buscar cliente por correo ──
+                    const Text('Correo del Cliente (dueño)', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.black54)),
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: clientEmailController,
+                            keyboardType: TextInputType.emailAddress,
+                            style: const TextStyle(fontSize: 14, color: Colors.black87),
+                            decoration: InputDecoration(
+                              hintText: 'ejemplo@correo.com',
+                              hintStyle: const TextStyle(color: Colors.black26),
+                              filled: true,
+                              fillColor: const Color(0xFFF1F5F9),
+                              border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+                              contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                              prefixIcon: const Icon(Icons.email_outlined, size: 18, color: Colors.black38),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Material(
+                          color: const Color(0xFF10B981),
+                          borderRadius: BorderRadius.circular(10),
+                          child: InkWell(
+                            borderRadius: BorderRadius.circular(10),
+                            onTap: isSearching ? null : () async {
+                              final email = clientEmailController.text.trim();
+                              if (email.isEmpty) {
+                                setDialogState(() => orderError = 'Ingresa un correo para buscar al cliente.');
+                                return;
+                              }
+                              setDialogState(() {
+                                isSearching = true;
+                                orderError = null;
+                                foundClientName = null;
+                                foundClientId = null;
+                              });
+                              try {
+                                final authService = Provider.of<AuthService>(context, listen: false);
+                                final user = await authService.findUserByEmail(email);
+                                setDialogState(() {
+                                  isSearching = false;
+                                  if (user != null) {
+                                    foundClientName = user.name;
+                                    foundClientId = user.uid;
+                                    orderError = null;
+                                  } else {
+                                    orderError = 'No se encontró ningún usuario con ese correo.';
+                                  }
+                                });
+                              } catch (e) {
+                                setDialogState(() {
+                                  isSearching = false;
+                                  orderError = 'Error buscando el cliente.';
+                                });
+                              }
+                            },
+                            child: Padding(
+                              padding: const EdgeInsets.all(12),
+                              child: isSearching
+                                  ? const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                                  : const Icon(Icons.search_rounded, color: Colors.white, size: 22),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+
+                    // ── Resultado de búsqueda ──
+                    if (foundClientName != null)
+                      Container(
+                        margin: const EdgeInsets.only(top: 10),
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFF0FDF4),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: const Color(0xFFBBF7D0)),
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(Icons.check_circle_rounded, color: Color(0xFF16A34A), size: 20),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    foundClientName!,
+                                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: Color(0xFF166534)),
+                                  ),
+                                  Text(
+                                    clientEmailController.text.trim(),
+                                    style: const TextStyle(fontSize: 11, color: Color(0xFF4ADE80)),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    Navigator.pop(context);
+                  },
+                  child: const Text('Cancelar', style: TextStyle(color: Colors.black54)),
+                ),
+                ElevatedButton(
+                  onPressed: () async {
+                    if (itemController.text.trim().isEmpty) {
+                      setDialogState(() => orderError = 'Ingresa el nombre del producto.');
+                      return;
+                    }
+                    if (foundClientId == null) {
+                      setDialogState(() => orderError = 'Primero busca y vincula al cliente por correo.');
+                      return;
+                    }
+
+                    final lat = double.tryParse(latController.text.trim()) ?? 20.3700;
+                    final lng = double.tryParse(lngController.text.trim()) ?? -100.0150;
+
+                    final firestoreService = Provider.of<FirestoreService>(context, listen: false);
+                    await firestoreService.createOrder(
+                      item: '${itemController.text.trim()} (${addressController.text.trim()})',
+                      clientId: foundClientId!,
+                      clientName: foundClientName!,
+                      brand: selectedBrand,
+                      trackingNumber: trackingController.text.trim(),
+                      destLatitude: lat,
+                      destLongitude: lng,
+                    );
+
+                    if (mounted) {
+                      Navigator.pop(context);
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('Paquete registrado y asignado a ${foundClientName!}'),
+                          backgroundColor: const Color(0xFF10B981),
+                        ),
+                      );
+                    }
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF3B82F6),
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
+                  child: const Text('Crear Paquete', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final authService = Provider.of<AuthService>(context, listen: false);
@@ -3853,19 +5274,6 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> with SingleTickerPr
         ),
         actions: [
           IconButton(
-            icon: const Icon(Icons.refresh, color: Colors.black54, size: 20),
-            tooltip: 'Re-sembrar pedidos',
-            onPressed: () async {
-              final firestoreService = Provider.of<FirestoreService>(context, listen: false);
-              await firestoreService.seedInitialOrders();
-              if (mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Pedidos re-sembrados exitosamente')),
-                );
-              }
-            },
-          ),
-          IconButton(
             icon: const Icon(Icons.logout, color: Colors.redAccent, size: 20),
             tooltip: 'Cerrar Sesión',
             onPressed: () => authService.signOut(),
@@ -3879,12 +5287,97 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> with SingleTickerPr
           _buildOrdersTab(),
         ],
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _showAddDriverDialog,
-        backgroundColor: const Color(0xFF3B82F6),
+      floatingActionButton: AnimatedBuilder(
+        animation: _tabController,
+        builder: (context, _) {
+          final isOrdersTab = _tabController.index == 1;
+          return FloatingActionButton.extended(
+            onPressed: isOrdersTab ? _showCreateOrderDialog : _showAddDriverDialog,
+            backgroundColor: const Color(0xFF3B82F6),
+            foregroundColor: Colors.white,
+            elevation: 2,
+            icon: Icon(isOrdersTab ? Icons.inventory_2_rounded : Icons.person_add_rounded),
+            label: Text(
+              isOrdersTab ? 'Nuevo Paquete' : 'Nuevo Repartidor',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+// ----------------------------------------------------------------------------
+// PANTALLA DE ESCÁNER DE CÓDIGO DE BARRAS
+// ----------------------------------------------------------------------------
+class _BarcodeScannerScreen extends StatefulWidget {
+  final Function(String) onScanned;
+  const _BarcodeScannerScreen({required this.onScanned});
+
+  @override
+  State<_BarcodeScannerScreen> createState() => _BarcodeScannerScreenState();
+}
+
+class _BarcodeScannerScreenState extends State<_BarcodeScannerScreen> {
+  bool _hasScanned = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
         foregroundColor: Colors.white,
-        elevation: 2,
-        child: const Icon(Icons.add),
+        title: const Text('Escanear Código de Barras', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+        elevation: 0,
+      ),
+      body: Stack(
+        children: [
+          MobileScanner(
+            onDetect: (capture) {
+              if (_hasScanned) return;
+              final List<Barcode> barcodes = capture.barcodes;
+              if (barcodes.isNotEmpty && barcodes.first.rawValue != null) {
+                _hasScanned = true;
+                final code = barcodes.first.rawValue!;
+                widget.onScanned(code);
+                Navigator.pop(context);
+              }
+            },
+          ),
+          // Overlay con guía visual
+          Center(
+            child: Container(
+              width: 280,
+              height: 140,
+              decoration: BoxDecoration(
+                border: Border.all(color: const Color(0xFF3B82F6), width: 2.5),
+                borderRadius: BorderRadius.circular(16),
+              ),
+            ),
+          ),
+          Positioned(
+            bottom: 60,
+            left: 0,
+            right: 0,
+            child: Column(
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: Colors.black54,
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: const Text(
+                    'Apunta al código de barras del paquete',
+                    style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w500),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -3896,11 +5389,15 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> with SingleTickerPr
 class InAppNotificationOverlay extends StatefulWidget {
   final Widget child;
   final String userEmail;
+  final String userId;
+  final String userRole;
 
   const InAppNotificationOverlay({
     super.key,
     required this.child,
     required this.userEmail,
+    required this.userId,
+    this.userRole = 'client',
   });
 
   @override
@@ -3929,22 +5426,21 @@ class _InAppNotificationOverlayState extends State<InAppNotificationOverlay> {
 
   void _startListeningToOrders() {
     final firestoreService = Provider.of<FirestoreService>(context, listen: false);
-    _ordersSubscription = firestoreService.getOrdersStream().listen((orders) {
-      for (final order in orders) {
-        // Solo procesar si el usuario actual es cliente del pedido
-        // o si es el repartidor asignado a ese pedido.
-        final bool isMyOrder = order.client.toLowerCase().contains(widget.userEmail.split('@').first.toLowerCase()) || 
-                              order.driverId.isNotEmpty; // Escuchar si es del repartidor
+    // Usar stream filtrado según el rol del usuario
+    final stream = widget.userRole == 'driver'
+        ? firestoreService.getOrdersForDriver(widget.userId)
+        : firestoreService.getOrdersForClient(widget.userId);
 
-        if (isMyOrder) {
-          final String? prevStatus = _previousOrderStatuses[order.id];
-          if (prevStatus != null && prevStatus != order.status) {
-            // El estado cambió! Disparar notificación
+    _ordersSubscription = stream.listen((orders) {
+      final settings = Provider.of<AppSettings>(context, listen: false);
+      for (final order in orders) {
+        final String? prevStatus = _previousOrderStatuses[order.id];
+        if (prevStatus != null && prevStatus != order.status) {
+          if (settings.receiveNotifications) {
             _showNotification(order);
           }
-          // Guardar estado actual
-          _previousOrderStatuses[order.id] = order.status;
         }
+        _previousOrderStatuses[order.id] = order.status;
       }
     });
   }

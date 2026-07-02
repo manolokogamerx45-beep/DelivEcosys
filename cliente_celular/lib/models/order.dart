@@ -2,6 +2,8 @@ class Order {
   final String id;
   final String item;
   final String client;
+  final String clientId;        // uid de Firebase del dueño del paquete
+  final String trackingNumber;  // Código de barras / número de rastreo
   final String brand;
   final String status; // pending, accepted, in_transit, arrived, delivered
   final String driverId;
@@ -15,11 +17,15 @@ class Order {
   final double destLatitude;
   final double destLongitude;
   final List<Map<String, dynamic>> chatLogs;
+  final bool driverArchived; // Si el repartidor archivó/ocultó el paquete entregado
+  final bool clientArchived; // Si el cliente archivó/ocultó el paquete entregado
 
   Order({
     required this.id,
     required this.item,
     required this.client,
+    this.clientId = '',
+    this.trackingNumber = '',
     required this.brand,
     required this.status,
     this.driverId = '',
@@ -33,6 +39,8 @@ class Order {
     required this.destLatitude,
     required this.destLongitude,
     required this.chatLogs,
+    this.driverArchived = false,
+    this.clientArchived = false,
   });
 
   factory Order.fromMap(String documentId, Map<String, dynamic> data) {
@@ -40,6 +48,8 @@ class Order {
       id: documentId,
       item: data['item'] ?? '',
       client: data['client'] ?? '',
+      clientId: data['clientId'] ?? '',
+      trackingNumber: data['trackingNumber'] ?? '',
       brand: data['brand'] ?? '',
       status: data['status'] ?? 'pending',
       driverId: data['driverId'] ?? '',
@@ -53,6 +63,8 @@ class Order {
       destLatitude: (data['destLatitude'] ?? 20.3700).toDouble(),
       destLongitude: (data['destLongitude'] ?? -100.0150).toDouble(),
       chatLogs: List<Map<String, dynamic>>.from(data['chatLogs'] ?? []),
+      driverArchived: data['driverArchived'] ?? false,
+      clientArchived: data['clientArchived'] ?? false,
     );
   }
 
@@ -60,6 +72,8 @@ class Order {
     return {
       'item': item,
       'client': client,
+      'clientId': clientId,
+      'trackingNumber': trackingNumber,
       'brand': brand,
       'status': status,
       'driverId': driverId,
@@ -73,6 +87,8 @@ class Order {
       'destLatitude': destLatitude,
       'destLongitude': destLongitude,
       'chatLogs': chatLogs,
+      'driverArchived': driverArchived,
+      'clientArchived': clientArchived,
     };
   }
 }

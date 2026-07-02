@@ -1,14 +1,102 @@
+import 'dart:math';
 import 'package:cloud_firestore/cloud_firestore.dart' hide Order;
 import '../models/order.dart';
 
 class FirestoreService {
   final FirebaseFirestore _db = FirebaseFirestore.instance;
 
-  // Stream of all orders in real-time
+  // Stream of all orders in real-time (para admin)
   Stream<List<Order>> getOrdersStream() {
     return _db.collection('orders').snapshots().map((snapshot) {
       return snapshot.docs.map((doc) => Order.fromMap(doc.id, doc.data())).toList();
     });
+  }
+
+  // Stream de órdenes filtradas por clientId (para el cliente)
+  Stream<List<Order>> getOrdersForClient(String clientId, {bool includeArchived = false}) {
+    var query = _db.collection('orders').where('clientId', isEqualTo: clientId);
+    if (!includeArchived) {
+      query = query.where('clientArchived', isEqualTo: false);
+    }
+    return query.snapshots().map((snapshot) {
+      return snapshot.docs.map((doc) => Order.fromMap(doc.id, doc.data())).toList();
+    });
+  }
+
+  // Stream de órdenes filtradas por driverId (para el repartidor)
+  Stream<List<Order>> getOrdersForDriver(String driverId, {bool includeArchived = false}) {
+    var query = _db.collection('orders').where('driverId', isEqualTo: driverId);
+    if (!includeArchived) {
+      query = query.where('driverArchived', isEqualTo: false);
+    }
+    return query.snapshots().map((snapshot) {
+      return snapshot.docs.map((doc) => Order.fromMap(doc.id, doc.data())).toList();
+    });
+  }
+
+  // Archivar orden para el repartidor
+  Future<void> archiveOrderForDriver(String orderId) async {
+    await _db.collection('orders').doc(orderId).update({
+      'driverArchived': true,
+    });
+  }
+
+  // Archivar orden para el cliente
+  Future<void> archiveOrderForClient(String orderId) async {
+    await _db.collection('orders').doc(orderId).update({
+      'clientArchived': true,
+    });
+  }
+
+  // Crear un nuevo pedido (admin)
+  Future<String> createOrder({
+    required String item,
+    required String clientId,
+    required String clientName,
+    required String brand,
+    String trackingNumber = '',
+    double destLatitude = 20.3700,
+    double destLongitude = -100.0150,
+  }) async {
+    // Generar un passcode aleatorio de 4 dígitos
+    final passcode = (Random().nextInt(9000) + 1000).toString();
+
+    final orderData = {
+      'item': item,
+      'client': clientName,
+      'clientId': clientId,
+      'trackingNumber': trackingNumber,
+      'brand': brand,
+      'status': 'pending',
+      'driverId': '',
+      'driverName': '',
+      'driverVehicle': '',
+      'passcode': passcode,
+      'progress': 0.0,
+      'eta': 0,
+      'currentX': 20.3720, // Punto de origen fijo (centro de distribución)
+      'currentY': -100.0190,
+      'destLatitude': destLatitude,
+      'destLongitude': destLongitude,
+      'chatLogs': [
+        {
+          'sender': 'system',
+          'text': 'Paquete registrado en $brand',
+          'timestamp': DateTime.now().millisecondsSinceEpoch,
+        }
+      ],
+      'createdAt': DateTime.now().millisecondsSinceEpoch,
+      'driverArchived': false,
+      'clientArchived': false,
+    };
+
+    final docRef = await _db.collection('orders').add(orderData);
+    return docRef.id;
+  }
+
+  // Eliminar un pedido
+  Future<void> deleteOrder(String orderId) async {
+    await _db.collection('orders').doc(orderId).delete();
   }
 
   // Update order status
@@ -72,6 +160,8 @@ class FirestoreService {
       'order-1': {
         'item': 'Audífonos Over-Ear',
         'client': 'Emmanuel S.',
+        'clientId': '',
+        'trackingNumber': 'AMZ-2024-001',
         'brand': 'Amazon Prime',
         'status': 'pending',
         'driverId': '',
@@ -91,6 +181,8 @@ class FirestoreService {
       'order-2': {
         'item': 'Teclado Mecánico',
         'client': 'Sofía L.',
+        'clientId': '',
+        'trackingNumber': 'ML-2024-002',
         'brand': 'MercadoLibre',
         'status': 'pending',
         'driverId': '',
@@ -110,6 +202,8 @@ class FirestoreService {
       'order-3': {
         'item': 'Smartphone',
         'client': 'Roberto M.',
+        'clientId': '',
+        'trackingNumber': 'DHL-2024-003',
         'brand': 'DHL Express',
         'status': 'pending',
         'driverId': '',
