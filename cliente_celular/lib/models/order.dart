@@ -19,6 +19,7 @@ class Order {
   final List<Map<String, dynamic>> chatLogs;
   final bool driverArchived; // Si el repartidor archivó/ocultó el paquete entregado
   final bool clientArchived; // Si el cliente archivó/ocultó el paquete entregado
+  final bool isRated;        // Si el cliente ya calificó la entrega
 
   Order({
     required this.id,
@@ -41,6 +42,7 @@ class Order {
     required this.chatLogs,
     this.driverArchived = false,
     this.clientArchived = false,
+    this.isRated = false,
   });
 
   factory Order.fromMap(String documentId, Map<String, dynamic> data) {
@@ -65,6 +67,7 @@ class Order {
       chatLogs: List<Map<String, dynamic>>.from(data['chatLogs'] ?? []),
       driverArchived: data['driverArchived'] ?? false,
       clientArchived: data['clientArchived'] ?? false,
+      isRated: data['isRated'] ?? false,
     );
   }
 
@@ -89,6 +92,7 @@ class Order {
       'chatLogs': chatLogs,
       'driverArchived': driverArchived,
       'clientArchived': clientArchived,
+      'isRated': isRated,
     };
   }
 }
