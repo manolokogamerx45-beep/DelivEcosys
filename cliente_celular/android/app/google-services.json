@@ -1,0 +1,82 @@
+{
+  "project_info": {
+    "project_number": "182414043276",
+    "project_id": "meli360",
+    "storage_bucket": "meli360.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:182414043276:android:2ec31eb06d36424734b3a9",
+        "android_client_info": {
+          "package_name": "com.repartidor.cliente"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "182414043276-ebjoa0md0bdc3l4h42hi9m2656uqho01.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD8ZCnajrJEB26h1r-3GwZxrdoOfuY6ZJ0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "182414043276-ebjoa0md0bdc3l4h42hi9m2656uqho01.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "182414043276-uspmqrtbgvsgo4ivncgit0orgvpbe0ku.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.repartidor.cliente"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:182414043276:android:afa17193ca7ecf6c34b3a9",
+        "android_client_info": {
+          "package_name": "com.repartidor.watch"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "182414043276-ebjoa0md0bdc3l4h42hi9m2656uqho01.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD8ZCnajrJEB26h1r-3GwZxrdoOfuY6ZJ0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "182414043276-ebjoa0md0bdc3l4h42hi9m2656uqho01.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "182414043276-uspmqrtbgvsgo4ivncgit0orgvpbe0ku.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.repartidor.cliente"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
